@@ -1,352 +1,138 @@
 #include <Arduino.h>
+#include "Matter.h"
+#include <app/server/OnboardingCodesUtil.h>
+using namespace chip;
+using namespace chip::app::Clusters;
+using namespace esp_matter;
+using namespace esp_matter::endpoint;
 
-#pragma GCC diagnostic ignored "-Wwrite-strings"
-
-#include <PubSubClient.h> 
 #include "FS.h"
 #include <EEPROM.h>
-#include <IotWebConf.h>
-//Debug Level definieren
+//Define debug level
 #define DEBUGLEVEL 3
 #include <DebugUtils.h>
 
+// -- Configuration version. This value should be changed if something has changed in the configuration structure.
+#define CONFIG_VERSION "BW-M_v0.1"
 
+#define PULSECOUNTER    18    // Pulse counter
+#define MOTOR_UP	      17    // Motor drives up
+#define MOTOR_DOWN      16    // Motor drives down
+#define BUTTON_UP       21    // Button for up
+#define BUTTON_DOWN     22    // Button for runter
 
-// -- Initialer Name des Gerätes. Wird auch als WLAN-SSID im AP-Modus benutzt SSID of the own Access Point.
-const char thingName[] = "GW60-ESP";
+// Cluster and attribute ID used by Matter window covering device
+const uint32_t CLUSTER_ID = WindowCovering::Id;
+const uint32_t ATTRIBUTE_ID = WindowCovering::Attributes::CurrentPositionLiftPercentage::Id;
 
-// -- Initiales Passwort zum Verbinden mit dem Gerät, wenn es im AP-Modus arbeitet.
-const char wifiInitialApPassword[] = "GW60-ESP";
+// Endpoint and attribute ref that will be assigned to Matter device
+uint16_t window_covering_id = 0;
+attribute_t *attribute_ref;
 
-#define STRING_LEN 128
-#define NUMBER_LEN 32
-
-// -- Konfigurations-Version. Dieser Wert sollte geändert werden, wenn sich etwas an der Konfigurations-Struktur geändert hat.
-#define CONFIG_VERSION "BW_v0.2"
-
-// -- Wenn im Bootvorgang auf LOW, startet das Gerät im AP-Modus mit dem initialen Passwort
-//    z.B. wenn das Passwort vergessen wurde
-#define CONFIG_PIN D0
-
-// -- MQTT Topic Prefix
-#define MQTT_TOPIC_PREFIX mqttTopicValue
-
-// -- Callback Deklarationen.
-void wifiConnected();
-void configSaved();
-boolean formValidator();
-void mqttSend(char const* mqtt_topic,char const* mqtt_content,bool mqttRetain);
+// -- Callback declarations
 void up();
 void down();
 bool isNumeric(String str);
 void setMaxCount();
-void callback(char const* topic, byte* payload, unsigned int length);
 void newPosition(int newPercentage);
 void calibrationRun();
 char * addIntToChar(char* text, int i);
 
-DNSServer dnsServer;
-WebServer server(80);
-HTTPUpdateServer httpUpdater;
-WiFiClient wifiClient;
-
-
-char mqttServerValue[STRING_LEN];
-char mqttPortValue[NUMBER_LEN];
-char mqttUserValue[STRING_LEN];
-char mqttPasswordValue[STRING_LEN];
-char mqttTopicValue[STRING_LEN];
-char mqttUpTopic[STRING_LEN];
-char mqttDownTopic[STRING_LEN];
-char mqttPauseTopic[STRING_LEN];
-char mqttCalibrationTopic[STRING_LEN];
-char mqttPositionTopic[STRING_LEN];
-char mqttCountTopic[STRING_LEN];
-char mqttStateTopic[STRING_LEN];
-char mqttInfoTopic[STRING_LEN];
-char mqttOnlineStatusTopic[STRING_LEN];
-
-IotWebConf iotWebConf(thingName, &dnsServer, &server, wifiInitialApPassword, CONFIG_VERSION);
-IotWebConfSeparator separator2 = IotWebConfSeparator();
-IotWebConfParameter mqttServer = IotWebConfParameter("MQTT Server", "mqttServer", mqttServerValue, STRING_LEN);
-IotWebConfParameter mqttPort = IotWebConfParameter("MQTT Port", "mqttPort", mqttPortValue, NUMBER_LEN,"1883");
-IotWebConfParameter mqttUser = IotWebConfParameter("MQTT User", "mqttUser", mqttUserValue, STRING_LEN);
-IotWebConfParameter mqttPassword = IotWebConfParameter("MQTT Passwort", "mqttPassword", mqttPasswordValue, STRING_LEN, "password");
-IotWebConfParameter mqttTopic = IotWebConfParameter("MQTT Topic-Prefix", "mqttTopic", mqttTopicValue, STRING_LEN, "text", "z.B. GW60/Testraum");
-
-
-// -- MQTT
-char const* mqtt_server = mqttServerValue;
-int mqtt_port;
-char const* mqtt_username = mqttUserValue;
-char const* mqtt_password = mqttPasswordValue;
-char const* mqtt_clientID = iotWebConf.getThingName();
-char message_buff[100];
-bool mqttRetain = false;
-int mqttQoS = 0;
-
-//int rssi = WiFi.RSSI(); // eg. -63
-
-// -- Variablen
+// -- Variables
 int dir = 0, count = 0, maxCount, newCount = 0, lastSendPercentage = 0;
 float percentage = 0;
 bool remote = false, needReset = false, posCertain = false, calMode = false, calUp = false, calDown = false, lastSendPercentageInit = false, newCountInit = false, maxCountInit = false, countRetrived = false, counted = false, posChange = false,posRunUp = false, posRunDown = false;
 byte value;
 
-/*
-*
-*Mqtt Funktionen
-*
-*/
-PubSubClient client(wifiClient); // -- MQTT initialisieren
-
-boolean reconnect() {  // -- MQTT Reconnect
-  boolean connected = false;
-
-  // -- 3 Verbindungsversuche, dann Neustart
-  for(int i = 0; i<2;i++){ 
-    if(client.connected()) {
-    connected = true;
-    break;
-    }
-    DEBUGPRINTLN1("Versuche MQTT-Verbindung aufzubauen... ");
-    // -- Versuche Neu-Verbindung
-    if (client.connect(mqtt_clientID, mqtt_username, mqtt_password, mqttOnlineStatusTopic,1, true, "false")) {
-
-      //Stellt sicher, dass ein Minimum an interaktive Topics erstellt werden
-      mqttSend(mqttUpTopic, "false", mqttRetain);
-      mqttSend(mqttDownTopic, "false", mqttRetain);
-      mqttSend(mqttPauseTopic, "false", mqttRetain);
-      mqttSend(mqttCalibrationTopic, "false", mqttRetain);
-      /*
-      ---toDo---
-      sprintf(bufIP, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3])
-      mqttSend(mqttIpTopic, wifiClient.localIP()., mqttRetain);
-      */
-      if(maxCountInit){
-        mqttSend(mqttInfoTopic, addIntToChar("Endpositon geladen: ",maxCount), mqttRetain);
-      }
-      else{
-        mqttSend(mqttInfoTopic, "Kalibrierung erforderlich!", mqttRetain);
-      }
-      // -- Re-Abonnierung
-      client.subscribe(mqttPositionTopic, mqttQoS);
-      client.subscribe(mqttUpTopic, mqttQoS);
-      client.subscribe(mqttDownTopic, mqttQoS);
-      client.subscribe(mqttPauseTopic, mqttQoS);
-      client.subscribe(mqttCalibrationTopic, mqttQoS);
-      client.subscribe(mqttCountTopic, mqttQoS);
-
-      DEBUGPRINTLN1("Mqtt Initialisiert");
-      DEBUGPRINTLN2("aktueller maxCount: "+String(maxCount));
-    }
-    else {
-      DEBUGPRINTLN1("fehlgeschlagen, rc=");
-      DEBUGPRINTLN1(client.state());
-      DEBUGPRINTLN3(" versuche erneut");
-      //Warte 1 Sekunden vor erneutem Versuch
-      delay(1000);
-    }
-  }
-  return connected;
+static void on_device_event(const ChipDeviceEvent *event, intptr_t arg) {}
+static esp_err_t on_identification(identification::callback_type_t type, uint16_t endpoint_id,
+                                   uint8_t effect_id, void *priv_data) {
+  return ESP_OK;
 }
 
-//MQTT Callback Funktion
-void callback(char const* topic, byte* payload, unsigned int length) {  
-  int i = 0; 
-  for(i=0; i<length; i++) {
-    message_buff[i] = payload[i];
+// Listener on attribute update requests.
+// In this example, when update is requested, path (endpoint, cluster and attribute) is checked
+// if it matches Window covering attribute.
+static esp_err_t on_attribute_update(attribute::callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id,
+                                     uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data) {
+  if (type == attribute::PRE_UPDATE && endpoint_id == window_covering_id &&
+      cluster_id == CLUSTER_ID && attribute_id == ATTRIBUTE_ID)  {
+    // We got an Window Covering attribute update!
+    boolean new_state = val->val.b;
+    percentage = new_state;
+    DEBUGPRINT3("Update on endpoint: ");
+    DEBUGPRINT3(endpoint_id);
+    DEBUGPRINT3(" cluster: ");
+    DEBUGPRINT3(cluster_id);
+    DEBUGPRINT3(" attribute: ");
+    DEBUGPRINTLN3(attribute_id);
   }
-  message_buff[i] = '\0';
-  String message = String(message_buff); // -- in String umwandeln
-
-  DEBUGPRINTLN2("Neue Nachricht empfangen ["+String(topic)+", "+message+"]");
-
-  //Fängt retained message auf um letzte bekannten count zu erhalten
-  //wird nur 1x ausgeführt
-  if(!countRetrived && strcmp(topic, mqttCountTopic) == 0){
-    if(isNumeric(message)){
-      int tmpCount = message.toInt();
-      //stellt sinnvollen Wert sicher
-      if(tmpCount >=0){
-        count = tmpCount;
-      }
-      DEBUGPRINTLN1("count retrieved: "+String(count));
-    }
-    countRetrived = true;
-  }
-  //Positionsbefehl
-  else if(strcmp(topic, mqttPositionTopic) == 0 && dir == 0 &&isNumeric(message)){
-    newPosition(message.toInt());
-  }
-  //Topic zum kompletten hochfahren
-  else if(strcmp(topic, mqttUpTopic) == 0){
-    if(posRunUp || posRunDown){
-      return;
-    }
-    if (message.equals("true")) {
-      remote = false;
-      up();
-      mqttSend(mqttUpTopic, "false", mqttRetain);
-    }
-  }
-  //Topic zum kompletten runterfahren
-  else if(strcmp(topic, mqttDownTopic) == 0){
-    if(posRunUp || posRunDown){
-      return;
-    }
-    if (message.equals("true")) {
-      remote = false;
-      down();
-      mqttSend(mqttDownTopic, "false", mqttRetain);
-    }
-  }
-  //Topic zum pausieren der aktuellen Aktion
-  else if(strcmp(topic, mqttPauseTopic) == 0){
-    if (message.equals("true")) {
-      if(posRunUp || posRunDown){
-        return;
-      }
-      remote = false;
-      if (dir == -1) {
-        down();    
-      } else if (dir == 1) {
-        up();
-      }
-      mqttSend(mqttPauseTopic, "false", mqttRetain);
-    }
-  }
-  //Topic zum Starten einer Kalibrierungsfahrt
-  else if(strcmp(topic, mqttCalibrationTopic) == 0){
-    if (message.equals("true")) {
-      calibrationRun();
-      mqttSend(mqttCalibrationTopic, "false", mqttRetain);
-    }
-  }
+  return ESP_OK;
 }
 
-//Senden mit Verbindungscheck
-void mqttSend(char const* mqtt_topic,char const* mqtt_content,bool mqttRetain) {  // MQTT Sende-Routine
-  if (client.publish(mqtt_topic, mqtt_content, mqttRetain)) {
-    DEBUGPRINTLN1("Nachricht gesendet: "+String(mqtt_topic)+", "+mqtt_content);
-  }
-  else if(client.connected()) {
-    client.publish(mqtt_topic, mqtt_content, mqttRetain);
-    DEBUGPRINTLN1("Nachricht gesendet bei 2. Versuch: "+String(mqtt_topic)+", "+String(mqtt_content));
-  }
-  else if(reconnect()){
-    client.publish(mqtt_topic, mqtt_content, mqttRetain);
-  }
-  else{
-    needReset = true;
-    DEBUGPRINTLN1("Sendung fehlgeschlagen: "+String(mqtt_topic)+", "+String(mqtt_content));
-  }
-}
-
-//Prüfen, ob der empfangene Wert nummerisch ist
-boolean isNumeric(String str) {  
-  if(!str){
-    return false;
-  }
-
-  if (str.length() == 0) {
-    return false;
-  }
-
-  boolean seenDecimal = false;
-
-  for(unsigned int i = 0; i < str.length(); ++i) {
-    if (isDigit(str.charAt(i))) {
-      continue;
-    }
-    if (str.charAt(i) == '.') {
-      if (seenDecimal) {
-        return false;
-      }
-      seenDecimal = true;
-      continue;
-    }
-    return false;
-  }
-  return true;
+void print_endpoint_info(String clusterName, endpoint_t *endpoint) {
+  uint16_t endpoint_id = endpoint::get_id(endpoint);
+  DEBUGPRINT3(clusterName);
+  DEBUGPRINT3(" has endpoint: ");
+  DEBUGPRINTLN3(endpoint_id);
 }
 
 
-void setupMqtt(){
 
-  client.setServer(mqtt_server, mqtt_port);
-  // -- Setze MQTT Callback-Funktion
-  client.setCallback(callback);
-  
-  // -- Bereite dynamische MQTT-Topics vor
-  String temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/open";
-  temp.toCharArray(mqttUpTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/close";
-  temp.toCharArray(mqttDownTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/pause";
-  temp.toCharArray(mqttPauseTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/state";
-  temp.toCharArray(mqttStateTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/info";
-  temp.toCharArray(mqttInfoTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/calibration";
-  temp.toCharArray(mqttCalibrationTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/position";
-  temp.toCharArray(mqttPositionTopic, STRING_LEN); 
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/alive";
-  temp.toCharArray(mqttOnlineStatusTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/count";
-  temp.toCharArray(mqttCountTopic, STRING_LEN);
+/************************************************************************************
+      Belt winder program
+*************************************************************************************/
+
+void setupPins()  // -- Pin declaration
+{
+  pinMode(PULSECOUNTER, INPUT);       // Pulse counter
+  pinMode(MOTOR_UP, INPUT_PULLUP);    // Motor drives up
+  pinMode(MOTOR_DOWN, INPUT_PULLUP);  // Motor drives down
+  pinMode(BUTTON_UP, OUTPUT);         // Button for up
+  digitalWrite(BUTTON_UP, HIGH);      // Set up button to HIGH
+  pinMode(BUTTON_DOWN, OUTPUT);       // Button for down
+  digitalWrite(BUTTON_DOWN, HIGH);    // Set down button to HIGH
 }
-/*
-*
-*Gurtwickler Programm
-*
-*/
 
-//Funktion für hoch
-void up() {
+
+void up() // -- function shutter up
+{
   if (dir != -1){
     if(!calMode && !posCertain){
       posRunUp = true;
+      DEBUGPRINTLN2("Shutter drives up");
     }
-    //Simulierter Tastendruck "up"
-    digitalWrite(D2, LOW);
+    //"activate button -> direction up"
+    digitalWrite(BUTTON_UP, LOW);
     delay(300);
-    digitalWrite(D2, HIGH);
+    digitalWrite(BUTTON_UP, HIGH);
     delay(500);
   }   
 }
 
-//Funktion für runter
-void down() { 
+
+void down()  //  -- function shutter down
+{ 
   if (dir != 1){
     if(!calMode && !posCertain){
       posRunDown = true;
+      DEBUGPRINTLN2("Shutter drives down");
     }
-    //Simulierter Tastendruck "down"
-    digitalWrite(D1, LOW);
+    // "activate button -> direction down"
+    digitalWrite(BUTTON_DOWN, LOW);
     delay(300);
-    digitalWrite(D1, HIGH);
+    digitalWrite(BUTTON_DOWN, HIGH);
     delay(500);
   }
 }
 
-//Speicherung der unteren Position
-void setMaxCount() {
+
+void setMaxCount() //  --  store lowest/closed position
+{
   if(count>0){
-    //Speicher count-Wert
+    // store count-value
     EEPROM.write(10, count);
-    //Speicher maxCount init-Flag
+    //store maxCount init-Flag
     EEPROM.write(11, 19);
     EEPROM.write(12, 92);
     EEPROM.write(13, 42);
@@ -355,172 +141,157 @@ void setMaxCount() {
 
     posCertain = true;
     maxCountInit = true;
-    DEBUGPRINTLN1("Neuer maximaler Count gesetzt:"+String(maxCount)+"]");
-    mqttSend(mqttInfoTopic, addIntToChar("Neue maximale Position gesetzt. count: ",maxCount), mqttRetain);
+    DEBUGPRINTLN2("new max. count-value stored:"+String(maxCount)+"]");
   }
   else{
-    mqttSend(mqttInfoTopic, addIntToChar("Maximaler Count fehlerhaft: ",count), mqttRetain);
-    DEBUGPRINTLN1("Maximaler Count fehlerhaft:"+String(maxCount)+"]");
+    DEBUGPRINTLN2("max. count-value error:"+String(maxCount)+"]");
   }
 }
 
-
-/*
-int unCounted = 0;
-//Überwacht den Sensor und meldet Probleme
-void sensorGuard(){
-  if((digitalRead(D3) || digitalRead(D4)&&!posChange){
-    bewegungOhneImpuls++;
-  }
-  else{
-    bewegungOhneImpuls=0;
-  }
-  if(bewegungOhneImpuls>5){
-    mqttSend(mqttInfoTopic,"Sensorfehler. Es werden keine Impulse gezählt.");
-  }
-}
-*/
-
-//Zählen der Positions-Impulse
-void countPosition(){
+void countPosition() //  --  count position-pulse
+{
   //sensorGuard();
-  if (digitalRead(D5) == LOW && digitalRead(D3) == HIGH && dir == 1 && !counted) {
+  if (digitalRead(PULSECOUNTER) == LOW && digitalRead(MOTOR_UP) == HIGH && dir == 1 && !counted) {
     count++;
-    DEBUGPRINTLN3("Neuer count: " + String(count));
+    DEBUGPRINTLN3("new pulse-count: " + String(count));
     if(!calMode && count > maxCount){
       count = maxCount;
     }
-    counted = true; //sicherstellen, dass nur einmal pro LOW-Impuls gezählt wird
-    posChange = true; //Erfassen, dass sich die Position verändert hat
+    counted = true;   //make sure that counting is done only once per LOW pulse
+    posChange = true; //Capture that the position has changed
     
   } 
-  else if (digitalRead(D5) == LOW && digitalRead(D4) == HIGH && dir == -1 && !counted) {
+  else if (digitalRead(PULSECOUNTER) == LOW && digitalRead(MOTOR_UP) == HIGH && dir == -1 && !counted) {
     if (count > 0){
       count--;
     }
-    DEBUGPRINTLN3("Neuer count: " + String(count));
-    counted = true; // -- sicherstellen, dass nur einmal pro LOW-Impuls gezählt wird
-    posChange = true; //Erfassen, dass sich die Position verändert hat
-  } else if (digitalRead(D5) == HIGH && counted == true) {
+    DEBUGPRINTLN3("new pulse-count: " + String(count));
+    counted = true;   //make sure that counting is done only once per LOW pulse
+    posChange = true; //Capture that the position has changed
+  } else if (digitalRead(PULSECOUNTER) == HIGH && counted == true) {
     counted = false;
   }
 }
 
 
-//aktuelle Position per MQTT senden
-void sendCurrentPosition(){
-  //Wert nur senden, wenn geändert und stillstand
+void sendCurrentPosition()  //  --  update current position
+{
+  //Send value only when changed and movement stopped
   if(!posChange || dir != 0){
     return;
   }
-  //count Wert
+  //count value
   char ccount[4];
   itoa( count, ccount, 10 );
-  mqttSend(mqttCountTopic, ccount, true);
+  DEBUGPRINTLN3("sendCurrentPosition: ccount = true: " + String(ccount));
   if(maxCountInit){
-    //Prozentwert
-    // -- Prozentwerte berechen
+    // Percentage value
+    // -- Calculate percentage values
     int percentage = count / (maxCount * 0.01);
     lastSendPercentage = percentage;
     char cpercentage[5];
     itoa( percentage, cpercentage, 10 );
-    mqttSend(mqttPositionTopic, cpercentage, false);
+    DEBUGPRINTLN3("sendCurrentPosition: cpercentage = false: " + String(cpercentage));
     lastSendPercentageInit = true;
   }
   posChange = false;
 }
 
-// MQTT-Übertragung der aktuellen (geänderten) Richtung
-void setCurrentDirection() {
-  if (digitalRead(D4) == LOW && dir != 1) {
-    mqttSend(mqttStateTopic, "Schliessen", mqttRetain);
+
+void setCurrentDirection() //  --  current (changed) direction
+{
+  if (digitalRead(MOTOR_DOWN) == LOW && dir != 1) {
     dir = 1;
-  } else if (digitalRead(D3) == LOW && dir != -1) {
-    mqttSend(mqttStateTopic, "Öffnen", mqttRetain);
+    DEBUGPRINTLN2("New status: Closing");
+  } else if (digitalRead(MOTOR_UP) == LOW && dir != -1) {
     dir = -1;
-  } else if (digitalRead(D4) == HIGH && digitalRead(D3) == HIGH && dir != 0) {
-    mqttSend(mqttStateTopic, "Inaktiv", mqttRetain);
+    DEBUGPRINTLN2("New status: Opening");
+  } else if (digitalRead(MOTOR_DOWN) == HIGH && digitalRead(MOTOR_UP) == HIGH && dir != 0) {
     dir = 0;
+    DEBUGPRINTLN2("New status: Inactive");
     delay(1000);
   }
 }
 
-//Logik für Positionsanfragen in %
-void newPosition(int newPercentage){
-    //Filterversuch für eigene publishes --> MQTT5.0 Feature
-    if(lastSendPercentageInit && lastSendPercentage == newPercentage){
-      return;
-    }
-    //Ignoriert Eingaben, wenn Kalibrierung stattfindet, es noch keinen maxCount gibt, oder gerade eine neue Postion angefahren wird
+void newPosition(int newPercentage)  //  --  Logic for position requests in %.
+{
+    //Ignores inputs when calibration is in progress, there is no maxCount yet, or a new position is being approached.
     if(calMode || !maxCountInit || remote){
       return;
+      DEBUGPRINTLN3("calMode is active, no maxCount is set or a now position is approched");
     }
     //Sanity check
     if(newPercentage<0 || newPercentage>100){
       return;
+      DEBUGPRINTLN3("Sanity check: newPercentage error");
     }
-    //setze neuen Soll-Wert
+    //set new target value
     newCount = int ((float (newPercentage)/100*maxCount)+0.5);
     newCountInit = true;
     if(newCount==maxCount){
       down();
+      DEBUGPRINTLN2("New percentage value is different, drive down");
     }
     else if(newCount==0){
       up();
+      DEBUGPRINTLN2("New percentage value is different, drive up");
     }
     else{
-      //Prüft ob ein Endanschlag seit boot angefahren wurde
+      //Checks whether an end stop has been approached since boot
       if(!posCertain){
-        //kürzeste Strecke zum neuen Punkt mit Halt bei Endstellung
-        //(maxCount-Count):Strecke nach unten
-        //(maxCount-NewCount):Strecke von unten zur neuen Position
-        //count: Strecke nach oben
-        //newCount: Stecke von oben zur neuen Position
+        //shortest distance to new point with stop at end position
+        //(maxCount-Count):Distance down
+        //(maxCount-NewCount):Distance from thebottom to new position
+        //count: Distance up
+        //newCount: Distance from the top to new position
         if((2*maxCount-count-newCount) >= count+newCount){
           up();
+          DEBUGPRINTLN2("Use the shortest route, drive up");
         }
         else{
           down();
+          DEBUGPRINTLN2("Use the shortest route, drive down");
         }
       }
       remote = true;
     }
 }
 
-//Fährt neuen Positionswert an
-void moveToNewPos() {
-  //Wird nicht ausgeführt wenn eine Positionsfahrt im Gange ist und eine neue Positon definiert wurde
+void moveToNewPos() //  --  Moves to new position value
+{
+  //Will not be executed if a position move is in progress and a new position has been defined.
   if(!remote || posRunUp || posRunDown){
     return;
+    DEBUGPRINTLN3("remote is active, or a now position is approched");
   }
-  //Stellt sicher, dass ein Wert eingegangen ist
+  //Ensures that a value has been received
   if(!newCountInit){
     remote = false;
     return;
   }
   if(newCount > count){
-    //wenn neuer Wert größer als aktueller ist und Rollladen aktuell gestoppt, dann starten
+    //if new value is greater than current and shutter currently stopped, then start
     if(dir == 0){
       down(); // --start
-      DEBUGPRINTLN2("Neuer Prozentwert unterscheidet sich, fahre runter");
+      DEBUGPRINTLN2("New percentage value differs, drive down");
     }
-    //wenn aktueller Wert kleiner als neuer ist und momentan nach oben gefahren wird, dann stopp
+    //if current value is smaller than new and is currently driven up, then stop
     else if(dir == -1){
-      down(); // -- stope jetzt
-      DEBUGPRINTLN2("Neuer Prozentwert ist gleich, stoppe jetzt");
+      down(); // -- stopp
+      DEBUGPRINTLN2("New percentage value is equal, stop now");
       remote = false;
     }
   }
   else if(newCount < count){
-    // -- wenn neuer Wert kleiner als aktueller ist und Rollladen aktuell gestoppt, dann starten
+    // -- if new value is smaller than current and shutter currently stopped, then start
     if(dir == 0){
       up(); // -- start
-      DEBUGPRINTLN2("Neuer Prozentwert unterscheidet sich, fahre hoch");
+      DEBUGPRINTLN2("New percentage value differs, drive up");
     }
-    // -- wenn aktueller Wert größer als neuer ist und momentan nach unten gefahren wird, dann stopp
+    // -- if current value is greater than new and is currently being driven down, then stop
     else if(dir == 1){
-      up(); // -- stoppe jetzt
-      DEBUGPRINTLN2("Neuer Prozentwert ist gleich, stoppe jetzt");
+      up(); // -- stopp
+      DEBUGPRINTLN2("New percentage value is equal, stop now");
       remote = false;
     }
   }
@@ -528,29 +299,29 @@ void moveToNewPos() {
     remote = false;
     if(dir ==1){
       up();  //stop
-      DEBUGPRINTLN2("Stop newCount = count");
+      DEBUGPRINTLN2("Stop newCount = count"+ String(count));
     }
     else if(dir ==-1){
       down();  //stop
-      DEBUGPRINTLN2("Stop newCount = count");
+      DEBUGPRINTLN2("Stop newCount = count"+ String(count));
     }
   }
 }
 
-//Initialisierungsfahrt
-void calibrationRun(){
+void calibrationRun()  //  --  Initialization drive
+{
   calMode = true;
   calUp = true;
-  mqttSend(mqttInfoTopic, "Kalibrierungsfaht...", mqttRetain);
   up();
+  DEBUGPRINTLN2("Calibration started, Drive up");
 }
 
 
 /*
-*Kalibrierung im Loop
-*1. calUp -fährt ganz nach oben und nullt Zähler
-*2. calDown -fährt ganz nach unten und speichert neues Maximum
-*Muss nach setDir ausgeführt werden und von calibrationRun gestartet werden.
+*Calibration in loop
+*1. calUp -goes all the way to the top and zeros counters
+*2. calDown -goes all the way down and saves new maximum
+*Must be executed after setDir and started by calibrationRun
 */
 void handleCalibration(){
   if(calMode){
@@ -568,6 +339,7 @@ void handleCalibration(){
       posRunUp = false;
       posRunDown = false;
       setMaxCount();
+      DEBUGPRINTLN2("Set new MaxCount = maxCount"+ String(maxCount));
     }
   }
 }
@@ -581,145 +353,16 @@ void handlePosCertainty(){
     posRunUp = false;
     posCertain = true;
     posChange = true;
-    DEBUGPRINTLN1("posCertain");
-    mqttSend(mqttInfoTopic, "Position eindeutig", mqttRetain);
+    DEBUGPRINTLN2("posCertain");
   }
   if(posRunDown){
     count = maxCount;
     posRunDown = false;
     posCertain = true;
     posChange = true;
-    DEBUGPRINTLN1("posCertain");
-    mqttSend(mqttInfoTopic, "Position eindeutig", mqttRetain);
+    DEBUGPRINTLN2("posCertain");
   } 
 }
-
-void setupPins(){
-  // -- Definiere Pins
-  pinMode(D5, INPUT);         // Impulszähler
-  pinMode(D3, INPUT_PULLUP);  // Motor fährt hoch
-  pinMode(D4, INPUT_PULLUP);  // Motor fährt runter
-  pinMode(D1, OUTPUT);        // Taste für runter
-  digitalWrite(D1, HIGH);     // Setze Taste auf HIGH
-  pinMode(D2, OUTPUT);        // Taste für hoch
-  digitalWrite(D2, HIGH);     // Setze Taste auf HIGH
-}
-/*
-*
-*Web-Server
-*
-*/
-
-// -- Handle Anfragen zum "/"-Pfad.
-void handleRoot(){
-  // -- Lass IotWebConf das Captive Portal testen und verwalten.
-  if (iotWebConf.handleCaptivePortal())
-  {
-    // -- Captive Portal Anfragen werden bedient.
-    return;
-  }
-  String s = "<!DOCTYPE html><html lang=\"en\"><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1, user-scalable=no\"/>";
-  s += "<title>MQTT Parameter</title></head><body>MQTT Parameter";
-  s += "<ul>";
-  s += "<li>MQTT Server: ";
-  s += mqttServerValue;
-  s += "<li>MQTT Port: ";
-  s += mqttPortValue;
-  s += "<li>MQTT Topic-Prefix: ";
-  s += mqttTopicValue;
-  s += "<li>MQTT Info Topic: ";
-  s += mqttInfoTopic;
-  s += "<li>MQTT Up Topic: ";
-  s += mqttUpTopic;
-  s += "<li>MQTT Down Topic: ";
-  s += mqttDownTopic;
-  s += "<li>MQTT Pause Topic: ";
-  s += mqttPauseTopic;
-  s += "<li>MQTT Position Topic: ";
-  s += mqttPositionTopic;
-  s += "<li>MQTT Calibration Topic: ";
-  s += mqttCalibrationTopic;
-  s += "<li>MQTT count Topic: ";
-  s += mqttStateTopic;
-  s += "<li>MQTT state Topic: ";
-  s += mqttCountTopic;
-  s += "<li>MQTT Online Status Topic: ";
-  s += mqttOnlineStatusTopic;
-  s += "</ul>";
-  s += "Gehe zur <a href='config'>Konfigurations-Seite</a> f&uuml;r &Auml;nderungen.";
-  s += "</body></html>\n";
-
-  server.send(200, "text/html", s);
-}
-
-
-void configSaved(){
-  DEBUGPRINTLN1("Konfiguration wurde aktuallisiert.");
-  needReset = true;
-}
-
-boolean formValidator(){
-  DEBUGPRINTLN1("Eingaben werden überprüft.");
-  boolean valid = true;
-  int s = server.arg(mqttServer.getId()).length();
-  if (s < 3)
-  {
-    mqttServer.errorMessage = "Gib bitte einen g&uuml;ltigen Server ein.";
-    valid = false;
-  }
-  /*int p = server.arg(mqttPort.getId()).length();
-  if (p < 3)
-  {
-    mqttPort.errorMessage = "Gib bitte einen g&uuml;ltigen Port ein.";
-    valid = false;
-  }*/
-  int t = server.arg(mqttTopic.getId()).length();
-  if (t < 3)
-  {
-    mqttTopic.errorMessage = "Gib bitte ein g&uuml;ltiges Topic ein.";
-    valid = false;
-  }
-  return valid;
-}
-
-void setupWebserver(){
-  iotWebConf.setConfigPin(CONFIG_PIN);
-  iotWebConf.addParameter(&separator2);
-  iotWebConf.addParameter(&mqttServer);
-  iotWebConf.addParameter(&mqttPort);
-  iotWebConf.addParameter(&mqttUser);
-  iotWebConf.addParameter(&mqttPassword);
-  iotWebConf.addParameter(&mqttTopic);
-  iotWebConf.setConfigSavedCallback(&configSaved);
-  iotWebConf.setFormValidator(&formValidator);
-  iotWebConf.setupUpdateServer(&httpUpdater);
-  iotWebConf.getApTimeoutParameter()->visible = true;
-
-  // -- IotWebConf-Konfiguration initialisieren.
-  iotWebConf.init();
-  mqtt_port = atoi(mqttPortValue);
-
-  // -- URL-Handler auf dem Webserver aktivieren
-  server.on("/", handleRoot);
-  server.on("/config", []{ iotWebConf.handleConfig(); });
-  server.onNotFound([](){ iotWebConf.handleNotFound(); });
-
-  //((Pure Magic -> someone should look into it)
-  //Probably not necesary, since already handled by iotWebConf
-  /*
-  #ifdef ESP8266
-    WiFi.hostname(iotWebConf.getThingName());
-  #elif defined(ESP32)
-    WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);  // This is a MUST!
-    WiFi.setHostname(iotWebConf.getThingName());
-  #endif
-  */
-}
-/*
-*
-*Sonstiges
-*
-*/
 
 char * addIntToChar(char* text, int i){
   char * temp = new char [200];
@@ -727,98 +370,122 @@ char * addIntToChar(char* text, int i){
   itoa(i, temp+strlen(temp), 10);
   return temp;
 }
-//Lade Werte aus den EEPROM
-void loadMaxCount(){
-    //Lade untere Position (maxCount) aus dem EEPROM
+
+void loadMaxCount()  //  --  Load values from the EEPROM
+{
+    //Load lower position (maxCount) from EEPROM
   maxCount = EEPROM.read (10);
   //Sanity check
   if(maxCount>0){
     DEBUGPRINTLN1("Geladene Konfig 'maxcount'= "+String(maxCount));
-    //Lade checks aus dem EEPROM
+    //Load checks from the EEPROM
     int check1 = EEPROM.read(11);
     int check2 = EEPROM.read(12);
     int check3 = EEPROM.read(13);
     if(check1 == 19 && check2 == 92 && check3 == 42){
       maxCountInit=true;
-      DEBUGPRINTLN1("Geladene Konfig 'maxcount initFlag'= "+String(maxCountInit));
-      DEBUGPRINTLN3("Geladene Konfig 'maxcount check1'= "+String(check1));
-      DEBUGPRINTLN3("Geladene Konfig 'maxcount check2'= "+String(check2));
-      DEBUGPRINTLN3("Geladene Konfig 'maxcount check3'= "+String(check3));
+      DEBUGPRINTLN1("Loaded config 'maxcount initFlag'= "+String(maxCountInit));
+      DEBUGPRINTLN3("Loaded config 'maxcount check1'= "+String(check1));
+      DEBUGPRINTLN3("Loaded config 'maxcount check2'= "+String(check2));
+      DEBUGPRINTLN3("Loaded config 'maxcount check3'= "+String(check3));
     }
   }
 }
 
 
-/*
-*
-*Setup & Loop
-*
-*/
 void setup() {
   Serial.begin(115200);
   // while the serial stream is not open, do nothing:
-  //Nur zum debuggen benötigt
+  // Only required for debugging
   if(DEBUGLEVEL >0){
     while (!Serial) ;
     delay(1000);
   }
   DEBUGPRINTLN1("Start");
 
-  setupWebserver();
-
-  setupMqtt();
-
   setupPins();
 
-  //lese gespeicherten maxCount Wert aus dem Speicher
+  //read stored maxCount value from memory
   loadMaxCount();
 
-  // -- So, alles erledigt... kann los gehen
-  DEBUGPRINTLN1("Initialisierung abgeschlossen.");
+  esp_log_level_set("*", ESP_LOG_DEBUG);
+
+    // Setup Matter node
+  node::config_t node_config;
+  node_t *node = node::create(&node_config, on_attribute_update, on_identification);
+
+  endpoint_t *endpoint;
+  cluster_t *cluster;
+
+  // Setup Window covering endpoint / cluster / attributes with default values
+  window_covering_device::config_t window_covering_device_config;
+  window_covering_device_config.window_covering.current_position_lift_percentage = false;
+  window_covering_device_config.window_covering.mode = false;
+  
+  
+
+    // Save on/off attribute reference. It will be used to read attribute value later.
+  attribute_ref = attribute::get(cluster::get(endpoint, CLUSTER_ID), ATTRIBUTE_ID);
+
+  // Save generated endpoint id
+  window_covering_id = endpoint::get_id(endpoint);
+
+  // Start Matter device
+  esp_matter::start(on_device_event);
+
+  endpoint = window_covering_device::create(node, &window_covering_device_config, ENDPOINT_FLAG_NONE, NULL);
+  cluster = cluster::get(endpoint, WindowCovering::Id);
+  cluster::window_covering::config_t window_covering;
+  cluster::window_covering::feature::lift::config_t lift;
+  //cluster::window_covering::feature::tilt::config_t tilt;
+  //cluster::window_covering::feature::position_aware_lift::config_t position_aware_lift;
+  //cluster::window_covering::feature::position_aware_tilt::config_t position_aware_tilt;
+  cluster::window_covering::feature::absolute_position::config_t absolute_position;
+  cluster::window_covering::feature::lift::add(cluster, &lift);
+  //cluster::window_covering::feature::tilt::add(cluster, &tilt);
+  //cluster::window_covering::feature::position_aware_lift::add(cluster, &position_aware_lift);
+  //cluster::window_covering::feature::position_aware_tilt::add(cluster, &position_aware_tilt);
+  cluster::window_covering::feature::absolute_position::add(cluster, &absolute_position);
+  print_endpoint_info("window_covering_device", endpoint);
+
+  esp_matter::start(on_device_event);
+
+  PrintOnboardingCodes(chip::RendezvousInformationFlags(chip::RendezvousInformationFlag::kBLE));
+
+    // -- So, all done... can go
+  DEBUGPRINTLN2("Initialization completed");
 }
 
-void loop() {
-  // -- doLoop should be called as frequently as possible.
-  iotWebConf.doLoop();
+  // Reads attribute values of Window covering
+esp_matter_attr_val_t get_absolute_position_value() {
+  esp_matter_attr_val_t absolute_position_value = esp_matter_invalid(NULL);
+  attribute::get_val(attribute_ref, &absolute_position_value);
+  return absolute_position_value;
+}
 
-  //wenn gerade eine Konfigurations-Änderung stattgefunden hat -> ESP neu starten
-  if (needReset) {
-    DEBUGPRINTLN1("Reboot nach einer Sekunde.");
-    iotWebConf.delay(1000);
-    ESP.restart();
-  }
-  
-  // check if MQTT is connected, if not: connect
-  if (WiFi.status() == WL_CONNECTED && !client.connected()) {
-    if(reconnect()){
-      //Set online satus
-      Serial.println(mqtt_port);
-      mqttSend(mqttOnlineStatusTopic, "true", mqttRetain);
-    }
-    else{
-      needReset = true;
-      //evtl. continue? idk
-      return;
-    }
-  }
-  //MQTT loop -Befehle werden hier empfangen
-  client.loop();
+// Sets Window covering to attribute values
+void set_absolute_position_value(esp_matter_attr_val_t* absolute_position_value) {
+  attribute::update(window_covering_id, CLUSTER_ID, ATTRIBUTE_ID, absolute_position_value);
+}
 
-  //Zähle aktuelle Position
+
+void loop(){
+
+  //Count current position
   countPosition();
-  //Bestimme Aktuelle Richtung
+
+  //Determine Current Direction
   setCurrentDirection();
 
-  //Stelle fest ob aktuelle Position eindeutig ist
+  //Determine if current position is unique
   handlePosCertainty();
 
-  //Aktuelle Position per Mqtt senden
+  //update current position
   sendCurrentPosition();
 
-  //Fahre neue Position an
+  //Approach new position
   moveToNewPos();
 
-  //Kalibrierungsfahrt ausführen
+  //Perform calibration drive
   handleCalibration();
-
 }
