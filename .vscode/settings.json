@@ -1,0 +1,13 @@
+{
+    "cmake.configureOnOpen": false,
+    "files.associations": {
+        "*.tcc": "cpp",
+        "functional": "cpp",
+        "regex": "cpp",
+        "cmath": "cpp",
+        "random": "cpp",
+        "limits": "cpp",
+        "tuple": "cpp",
+        "type_traits": "cpp"
+    }
+}

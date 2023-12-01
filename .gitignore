@@ -3,3 +3,5 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+lib/esp32-arduino-matter
+lib/arduino-esp32-master
