@@ -27,9 +27,8 @@ https://github.com/jakubdybczak/esp32-arduino-matter.git
 
 # To-Do's
 * beautify readme...
-* tests as soon as Apple has released the update to 16.2
+* The connection between the matter code and the rest of the code still needs to be completed.
+* A custom device for calibrating the belt winder still needs to be created and inserted. (possibly a button could work)
 
 ATTENTION:
 This is an untested version, the communication to the Matter SDK is not yet defined.
-
-Translated with www.DeepL.com/Translator (free version)
