@@ -3,7 +3,10 @@
 #include "FS.h"
 #include <EEPROM.h>
 
+#include <string>
 
+#include <esp_log.h>
+#include <esp_err.h>
 
 
 // -- Variables
@@ -78,10 +81,12 @@ void setMaxCount() //  --  store lowest/closed position
 
     posCertain = true;
     maxCountInit = true;
-    DEBUGPRINTLN2("new max. count-value stored:"+String(maxCount)+"]");
+    ESP_LOGD(TAG, "new max. count-value stored: %d", maxCount);
+    //DEBUGPRINTLN2("new max. count-value stored:"+String(maxCount)+"]");
   }
   else{
-    DEBUGPRINTLN2("max. count-value error:"+String(maxCount)+"]");
+    ESP_LOGD(TAG, "new max. count-value ERROR: %d", maxCount);
+    //DEBUGPRINTLN2("max. count-value error:"+String(maxCount)+"]");
   }
 }
 
@@ -90,7 +95,8 @@ void countPosition() //  --  count position-pulse
   //sensorGuard();
   if (digitalRead(PULSECOUNTER) == LOW && digitalRead(MOTOR_UP) == HIGH && dir == 1 && !counted) {
     count++;
-    DEBUGPRINTLN3("new pulse-count: " + String(count));
+    ESP_LOGD(TAG, "new pulse-count: %d", count);
+    //DEBUGPRINTLN3("new pulse-count: " + String(count));
     if(!calMode && count > maxCount){
       count = maxCount;
     }
@@ -102,7 +108,8 @@ void countPosition() //  --  count position-pulse
     if (count > 0){
       count--;
     }
-    DEBUGPRINTLN3("new pulse-count: " + String(count));
+    ESP_LOGD(TAG, "new pulse-count: %d", count);
+    //DEBUGPRINTLN3("new pulse-count: " + String(count));
     counted = true;   //make sure that counting is done only once per LOW pulse
     posChange = true; //Capture that the position has changed
   } else if (digitalRead(PULSECOUNTER) == HIGH && counted == true) {
@@ -120,7 +127,8 @@ void sendCurrentPosition()  //  --  update current position
   //count value
   char ccount[4];
   itoa( count, ccount, 10 );
-  DEBUGPRINTLN3("sendCurrentPosition: ccount = true: " + String(ccount));
+  ESP_LOGD(TAG, "sendCurrentPosition: ccount = true: %d", ccount);
+  //DEBUGPRINTLN3("sendCurrentPosition: ccount = true: " + String(ccount));
   if(maxCountInit){
     // Percentage value
     // -- Calculate percentage values
@@ -128,7 +136,8 @@ void sendCurrentPosition()  //  --  update current position
     lastSendPercentage = percentage;
     char cpercentage[5];
     itoa( percentage, cpercentage, 10 );
-    DEBUGPRINTLN3("sendCurrentPosition: cpercentage = false: " + String(cpercentage));
+    ESP_LOGD(TAG, "sendCurrentPosition: cpercentage = false: %d", cpercentage);
+    //DEBUGPRINTLN3("sendCurrentPosition: cpercentage = false: " + String(cpercentage));
     lastSendPercentageInit = true;
   }
   posChange = false;
@@ -139,13 +148,16 @@ void setCurrentDirection() //  --  current (changed) direction
 {
   if (digitalRead(MOTOR_DOWN) == LOW && dir != 1) {
     dir = 1;
-    DEBUGPRINTLN2("New status: Closing");
+    ESP_LOGD(TAG, "New status: Closing");
+    //DEBUGPRINTLN2("New status: Closing");
   } else if (digitalRead(MOTOR_UP) == LOW && dir != -1) {
     dir = -1;
-    DEBUGPRINTLN2("New status: Opening");
+    ESP_LOGD(TAG, "New status: Opening");
+    //DEBUGPRINTLN2("New status: Opening");
   } else if (digitalRead(MOTOR_DOWN) == HIGH && digitalRead(MOTOR_UP) == HIGH && dir != 0) {
     dir = 0;
-    DEBUGPRINTLN2("New status: Inactive");
+    ESP_LOGD(TAG, "New status: Inactive");
+    //DEBUGPRINTLN2("New status: Inactive");
     delay(1000);
   }
 }
@@ -155,23 +167,27 @@ void newPosition(int newPercentage)  //  --  Logic for position requests in %.
     //Ignores inputs when calibration is in progress, there is no maxCount yet, or a new position is being approached.
     if(calMode || !maxCountInit || remote){
       return;
-      DEBUGPRINTLN3("calMode is active, no maxCount is set or a now position is approched");
+      ESP_LOGD(TAG, "calMode is active, no maxCount is set or a now position is approched");
+      //DEBUGPRINTLN3("calMode is active, no maxCount is set or a now position is approched");
     }
     //Sanity check
     if(newPercentage<0 || newPercentage>100){
       return;
-      DEBUGPRINTLN3("Sanity check: newPercentage error");
+      ESP_LOGD(TAG, "Sanity check: newPercentage error");
+      //DEBUGPRINTLN3("Sanity check: newPercentage error");
     }
     //set new target value
     newCount = int ((float (newPercentage)/100*maxCount)+0.5);
     newCountInit = true;
     if(newCount==maxCount){
       down();
-      DEBUGPRINTLN2("New percentage value is different, drive down");
+      ESP_LOGD(TAG, "New percentage value is different, drive down");
+      //DEBUGPRINTLN2("New percentage value is different, drive down");
     }
     else if(newCount==0){
       up();
-      DEBUGPRINTLN2("New percentage value is different, drive up");
+      ESP_LOGD(TAG, "New percentage value is different, drive up");
+      //DEBUGPRINTLN2("New percentage value is different, drive up");
     }
     else{
       //Checks whether an end stop has been approached since boot
@@ -183,11 +199,13 @@ void newPosition(int newPercentage)  //  --  Logic for position requests in %.
         //newCount: Distance from the top to new position
         if((2*maxCount-count-newCount) >= count+newCount){
           up();
-          DEBUGPRINTLN2("Use the shortest route, drive up");
+          ESP_LOGD(TAG, "Use the shortest route, drive up");
+          //DEBUGPRINTLN2("Use the shortest route, drive up");
         }
         else{
           down();
-          DEBUGPRINTLN2("Use the shortest route, drive down");
+          ESP_LOGD(TAG, "Use the shortest route, drive down");
+          //DEBUGPRINTLN2("Use the shortest route, drive down");
         }
       }
       remote = true;
@@ -199,7 +217,8 @@ void moveToNewPos() //  --  Moves to new position value
   //Will not be executed if a position move is in progress and a new position has been defined.
   if(!remote || posRunUp || posRunDown){
     return;
-    DEBUGPRINTLN3("remote is active, or a now position is approched");
+    ESP_LOGD(TAG, "remote is active, or a now position is approched");
+    //DEBUGPRINTLN3("remote is active, or a now position is approched");
   }
   //Ensures that a value has been received
   if(!newCountInit){
@@ -210,12 +229,14 @@ void moveToNewPos() //  --  Moves to new position value
     //if new value is greater than current and shutter currently stopped, then start
     if(dir == 0){
       down(); // --start
-      DEBUGPRINTLN2("New percentage value differs, drive down");
+      ESP_LOGD(TAG, "New percentage value differs, drive down");
+      //DEBUGPRINTLN2("New percentage value differs, drive down");
     }
     //if current value is smaller than new and is currently driven up, then stop
     else if(dir == -1){
       down(); // -- stopp
-      DEBUGPRINTLN2("New percentage value is equal, stop now");
+      ESP_LOGD(TAG, "New percentage value is equal, stop now");
+      //DEBUGPRINTLN2("New percentage value is equal, stop now");
       remote = false;
     }
   }
@@ -223,12 +244,14 @@ void moveToNewPos() //  --  Moves to new position value
     // -- if new value is smaller than current and shutter currently stopped, then start
     if(dir == 0){
       up(); // -- start
-      DEBUGPRINTLN2("New percentage value differs, drive up");
+      ESP_LOGD(TAG, "New percentage value differs, drive up");
+      //DEBUGPRINTLN2("New percentage value differs, drive up");
     }
     // -- if current value is greater than new and is currently being driven down, then stop
     else if(dir == 1){
       up(); // -- stopp
-      DEBUGPRINTLN2("New percentage value is equal, stop now");
+      ESP_LOGD(TAG, "New percentage value is equal, stop now");
+      //DEBUGPRINTLN2("New percentage value is equal, stop now");
       remote = false;
     }
   }
@@ -236,11 +259,13 @@ void moveToNewPos() //  --  Moves to new position value
     remote = false;
     if(dir ==1){
       up();  //stop
-      DEBUGPRINTLN2("Stop newCount = count"+ String(count));
+      ESP_LOGD(TAG, "Stop newCount = count: %d", count);
+      //DEBUGPRINTLN2("Stop newCount = count"+ String(count));
     }
     else if(dir ==-1){
       down();  //stop
-      DEBUGPRINTLN2("Stop newCount = count"+ String(count));
+      ESP_LOGD(TAG, "Stop newCount = count: %d", count);
+      //DEBUGPRINTLN2("Stop newCount = count"+ String(count));
     }
   }
 }
@@ -250,7 +275,8 @@ void calibrationRun()  //  --  Initialization drive
   calMode = true;
   calUp = true;
   up();
-  DEBUGPRINTLN2("Calibration started, Drive up");
+  ESP_LOGD(TAG, "Calibration started, Drive up");
+  //DEBUGPRINTLN2("Calibration started, Drive up");
 }
 
 
@@ -276,7 +302,8 @@ void handleCalibration(){
       posRunUp = false;
       posRunDown = false;
       setMaxCount();
-      DEBUGPRINTLN2("Set new MaxCount = maxCount"+ String(maxCount));
+      ESP_LOGD(TAG, "Set new MaxCount = maxCount: %d", maxCount);
+      //DEBUGPRINTLN2("Set new MaxCount = maxCount"+ String(maxCount));
     }
   }
 }
@@ -290,14 +317,16 @@ void handlePosCertainty(){
     posRunUp = false;
     posCertain = true;
     posChange = true;
-    DEBUGPRINTLN2("posCertain");
+    ESP_LOGD(TAG, "posCertain");
+    //DEBUGPRINTLN2("posCertain");
   }
   if(posRunDown){
     count = maxCount;
     posRunDown = false;
     posCertain = true;
     posChange = true;
-    DEBUGPRINTLN2("posCertain");
+    ESP_LOGD(TAG, "posCertain");
+    //DEBUGPRINTLN2("posCertain");
   } 
 }
 
@@ -314,17 +343,22 @@ void loadMaxCount()  //  --  Load values from the EEPROM
   maxCount = EEPROM.read (10);
   //Sanity check
   if(maxCount>0){
-    DEBUGPRINTLN1("Geladene Konfig 'maxcount'= "+String(maxCount));
+    ESP_LOGD(TAG, "Geladene Konfig 'maxcount'= %d", maxCount);
+    //DEBUGPRINTLN1("Geladene Konfig 'maxcount'= "+String(maxCount));
     //Load checks from the EEPROM
     int check1 = EEPROM.read(11);
     int check2 = EEPROM.read(12);
     int check3 = EEPROM.read(13);
     if(check1 == 19 && check2 == 92 && check3 == 42){
       maxCountInit=true;
-      DEBUGPRINTLN1("Loaded config 'maxcount initFlag'= "+String(maxCountInit));
-      DEBUGPRINTLN3("Loaded config 'maxcount check1'= "+String(check1));
-      DEBUGPRINTLN3("Loaded config 'maxcount check2'= "+String(check2));
-      DEBUGPRINTLN3("Loaded config 'maxcount check3'= "+String(check3));
+      ESP_LOGD(TAG, "Loaded config 'maxcount initFlag = %d", maxCountInit);
+      //DEBUGPRINTLN1("Loaded config 'maxcount initFlag'= "+String(maxCountInit));
+      ESP_LOGD(TAG, "Loaded config 'maxcount check1 = %d", check1);
+      //DEBUGPRINTLN3("Loaded config 'maxcount check1'= "+String(check1));
+      ESP_LOGD(TAG, "Loaded config 'maxcount check2 = %d", check2);
+      //DEBUGPRINTLN3("Loaded config 'maxcount check2'= "+String(check2));
+      ESP_LOGD(TAG, "Loaded config 'maxcount check3 = %d", check3);
+      //DEBUGPRINTLN3("Loaded config 'maxcount check3'= "+String(check3));
     }
   }
 }

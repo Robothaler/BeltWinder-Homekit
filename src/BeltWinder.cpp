@@ -7,6 +7,13 @@ using namespace chip;
 using namespace chip::app::Clusters;
 using namespace esp_matter;
 using namespace esp_matter::endpoint;
+using namespace esp_matter::attribute;
+using namespace esp_matter::cluster;
+
+#include <string>
+
+#include <esp_log.h>
+#include <esp_err.h>
 
 // -- Callback declarations
 void up();
@@ -29,14 +36,12 @@ void loadMaxCount();
 void countPosition();
 
 // Cluster and attribute ID used by Matter WindowCovering device
-const uint32_t CLUSTER_ID_COVERING = WindowCovering::Id;
-const uint32_t ATTRIBUTE_ID_COVERING = WindowCovering::Attributes::Type::Id;
-// const attribute_t TYPE = WindowCovering::Attributes::EndProductType::Id;
+const uint32_t CLUSTER_ID = WindowCovering::Id;
+const uint32_t ATTRIBUTE_ID = WindowCovering::Attributes::Type::Id;
 
 // Endpoint and attribute ref that will be assigned to Matter device
-uint16_t window_covering_id = 0;
+uint16_t windowcovering_endpoint_id = 0;
 attribute_t *attribute_ref;
-// int window_covering_type = 11;
 
 /**
    This program presents many Matter devices and should be used only
@@ -54,71 +59,86 @@ static esp_err_t on_identification(identification::callback_type_t type, uint16_
   return ESP_OK;
 }
 
-static esp_err_t on_attribute_update(attribute::callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id,
-                                     uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data) {
-  if (type == attribute::PRE_UPDATE) {
-    Serial.print("Update on endpoint: ");
-    Serial.print(endpoint_id);
-    Serial.print(" cluster: ");
-    Serial.print(cluster_id);
-    Serial.print(" attribute: ");
-    Serial.println(attribute_id);
+// Listener on attribute update requests.
+// In this example, when update is requested, path (endpoint, cluster and
+// attribute) is checked if it matches plugin unit attribute. If yes, LED changes
+// state to new one.
+static esp_err_t on_attribute_update(attribute::callback_type_t type,
+                                     uint16_t endpoint_id, uint32_t cluster_id,
+                                     uint32_t attribute_id,
+                                     esp_matter_attr_val_t *val,
+                                     void *priv_data) {
+  if (type == attribute::PRE_UPDATE && cluster_id == CLUSTER_ID && attribute_id == ATTRIBUTE_ID) {
+    // We got an windowcovering attribute update!
+    bool newPercentage = val->val.b;
+    if (endpoint_id == windowcovering_endpoint_id) {
+      return newPercentage;
+      ESP_LOGI(TAG, " newPercentage: %d", newPercentage);
+  }
   }
   return ESP_OK;
 }
 
 void print_endpoint_info(String clusterName, endpoint_t *endpoint) {
   uint16_t endpoint_id = endpoint::get_id(endpoint);
-  Serial.print(clusterName);
-  Serial.print(" has endpoint: ");
-  Serial.println(endpoint_id);
+  ESP_LOGI(TAG, " Clustername: %d", clusterName);
+  ESP_LOGI(TAG, " has endpoint: %d", endpoint_id);
 }
 
 void setup() {
   Serial.begin(115200);
+
+  esp_log_level_set("*", ESP_LOG_DEBUG);
+
   // while the serial stream is not open, do nothing:
   // Only required for debugging
   if(DEBUGLEVEL >0){
     while (!Serial) ;
     delay(1000);
   }
-  DEBUGPRINTLN1("Start");
+  ESP_LOGD(TAG, "Start");
+
 
   setupPins();
 
   //read stored maxCount value from memory
   loadMaxCount();
 
-
-  esp_log_level_set("*", ESP_LOG_DEBUG);
-
+/**
+ * @brief This function creates a temperature sensor endpoint and associated cluster. The created endpoint and cluster are 
+ * stored in the returned matter_config_t structure. The function also sets the name and attribute_id fields of 
+ * the matter_config_t structure. 
+ * 
+ * @param node  A pointer to the node_t structure
+ * 
+ * @return  A structure that contains information about the created temperature sensor endpoint and cluster
+ */
   node::config_t node_config;
   node_t *node = node::create(&node_config, on_attribute_update, on_identification);
 
   endpoint_t *endpoint;
   cluster_t *cluster;
 
-  // Save on/off attribute reference. It will be used to read attribute value later.
+  // Save windowcovering attribute reference. It will be used to read attribute value later.
   attribute_ref =
-    attribute::get(cluster::get(endpoint, CLUSTER_ID_COVERING), ATTRIBUTE_ID_COVERING);
-  
-  /*
-  window_covering_type =
-    attribute::get(cluster::get(endpoint, CLUSTER_ID_COVERING), TYPE);
-  */
+    attribute::get(cluster::get(endpoint, CLUSTER_ID), ATTRIBUTE_ID);
+    
 
   // Save generated endpoint id
-  window_covering_id = endpoint::get_id(endpoint);
+  windowcovering_endpoint_id = endpoint::get_id(endpoint);
+  ESP_LOGD(TAG, "Window covering endpoint created with id %d", windowcovering_endpoint_id);
 
   // !!!
   // USE ONLY ABOUT 4 ENDPOINTS TO AVOID OUT OF MEMORY ERRORS
   // MANUALLY COMMENT REST OF ENDPOINTS
   // !!!
   
+  window_covering_device::config_t wcd_config(static_cast<uint8_t>(chip::app::Clusters::WindowCovering::EndProductType::kRollerShutter));
   window_covering_device::config_t window_covering_device_config;
   endpoint = window_covering_device::create(node, &window_covering_device_config, ENDPOINT_FLAG_NONE, NULL);
   /* Add additional control clusters */
   cluster = cluster::get(endpoint, WindowCovering::Id);
+  ESP_LOGD(TAG, "window_covering_device cluster created with cluster_id %d", cluster);
   cluster::window_covering::feature::lift::config_t lift;
   cluster::window_covering::feature::position_aware_lift::config_t position_aware_lift;
   nullable<uint8_t> percentage = nullable<uint8_t>(0);
@@ -131,6 +151,7 @@ void setup() {
   cluster::window_covering::feature::position_aware_lift::add(cluster, &position_aware_lift);
   cluster::window_covering::feature::absolute_position::add(cluster, &absolute_position);
   print_endpoint_info("window_covering_device", endpoint);
+  ESP_LOGD(TAG, "window_covering_device %d", endpoint);
 
   // Setup DAC (this is good place to also set custom commission data, passcodes etc.)
   esp_matter::set_custom_dac_provider(chip::Credentials::Examples::GetExampleDACProvider());
@@ -148,8 +169,8 @@ esp_matter_attr_val_t get_lift_attribute_value(esp_matter::attribute_t *attribut
 }
 
 // Sets plugin unit lift attribute value
-void set_lift_attribute_value(esp_matter_attr_val_t *newPercentage, uint16_t window_covering_id) {
-  attribute::update(window_covering_id, CLUSTER_ID_COVERING, ATTRIBUTE_ID_COVERING, newPercentage);
+void set_lift_attribute_value(esp_matter_attr_val_t *newPercentage, uint16_t windowcovering_endpoint_id) {
+  attribute::update(windowcovering_endpoint_id, CLUSTER_ID, ATTRIBUTE_ID, newPercentage);
 }
 
 void loop(){
