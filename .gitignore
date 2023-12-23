@@ -5,3 +5,4 @@
 .vscode/ipch
 lib/esp32-arduino-matter
 lib/arduino-esp32-master
+include/Examples
