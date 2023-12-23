@@ -17,8 +17,8 @@ https://github.com/jakubdybczak/esp32-arduino-matter.git
 
 # Features:
 
-**Integration via QR code or via code input:**.
-QR-Code: https://project-chip.github.io/connectedhomeip/qrcode.html?data=MT%3AY.K9042C00KA0648G00
+**Integration via QR code or via code input:**.   
+    * QR-Code: https://project-chip.github.io/connectedhomeip/qrcode.html?data=MT%3AY.K9042C00KA0648G00  
     * The calibration run must be carried out in the app after the first installation, after the end stops of the GW60 have been set. To do this, the light switch in the app (I have named this "Calibration") must be pressed.
 * After reboot:
     * last known position is transmitted. Position is unconfirmed
