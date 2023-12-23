@@ -1,521 +1,657 @@
 #include <Arduino.h>
+#include "Matter.h"
+#include <app/server/OnboardingCodesUtil.h>
+#include <app/clusters/window-covering-server/window-covering-server.h>
+#include <credentials/examples/DeviceAttestationCredsExample.h>
+#include "Config.h"
 
-#pragma GCC diagnostic ignored "-Wwrite-strings"
-
-#include <PubSubClient.h> 
-#include "FS.h"
-#include <EEPROM.h>
-#include <x_IotWebConf.h>
-//Debug Level definieren
+//Define debug level
 #define DEBUGLEVEL 0
 #include <DebugUtils.h>
 
+#include <esp_log.h>
+#include <esp_err.h>
+
+// Custom keys for your data
+const char * kMaxCountKey = "MaxCount";
+
+using namespace chip;
+using namespace chip::app::Clusters;
+using namespace esp_matter;
+using namespace esp_matter::endpoint;
+using namespace esp_matter::attribute;
+using namespace esp_matter::cluster;
+
+using namespace chip::app::Clusters::WindowCovering;
+
+// Cluster and attribute ID used by Matter WindowCovering Device
+const uint32_t WINDOW_COVERING_CLUSTER_ID = WindowCovering::Id;
+const uint32_t WINDOW_COVERING_ATTRIBUTE_ID_TARGET = WindowCovering::Attributes::TargetPositionLiftPercent100ths::Id;
+const uint32_t WINDOW_COVERING_ATTRIBUTE_ID_CURRENT = WindowCovering::Attributes::CurrentPositionLiftPercent100ths::Id;
+const uint32_t WINDOW_COVERING_ATTRIBUTE_ID_OPERATE = WindowCovering::Attributes::OperationalStatus::Id;
+const uint32_t WINDOW_COVERING_ATTRIBUTE_ID_ENDTYPE = WindowCovering::Attributes::EndProductType::Id;
+const uint32_t WINDOW_COVERING_ATTRIBUTE_ID_TYPE = WindowCovering::Attributes::Type::Id;
+const uint32_t WINDOW_COVERING_ATTRIBUTE_ID_CONFIG = WindowCovering::Attributes::ConfigStatus::Id;
+const uint32_t WINDOW_COVERING_ATTRIBUTE_ID_MODE = WindowCovering::Attributes::Mode::Id;
+const uint32_t WINDOW_COVERING_ATTRIBUTE_ID_SAFETY = WindowCovering::Attributes::SafetyStatus::Id;
+// Cluster for CalibrationSwitch
+const uint32_t CLUSTER_ID = OnOff::Id;
+const uint32_t ATTRIBUTE_ID = OnOff::Attributes::OnOff::Id;
+
+uint16_t window_covering_endpoint_id = 0;
+uint16_t switch_endpoint_id_1 = 0;
+attribute_t *attribute_ref_target;
+attribute_t *attribute_ref_1;
+
+static const char TAG[] = "WindowCovering-App";
 
 
-// -- Initialer Name des Gerätes. Wird auch als WLAN-SSID im AP-Modus benutzt SSID of the own Access Point.
-const char thingName[] = "GW60-ESP";
-
-// -- Initiales Passwort zum Verbinden mit dem Gerät, wenn es im AP-Modus arbeitet.
-const char wifiInitialApPassword[] = "GW60-ESP";
-
-#define STRING_LEN 128
-#define NUMBER_LEN 32
-
-// -- Konfigurations-Version. Dieser Wert sollte geändert werden, wenn sich etwas an der Konfigurations-Struktur geändert hat.
-#define CONFIG_VERSION "BW_v0.1"
-
-// -- Wenn im Bootvorgang auf LOW, startet das Gerät im AP-Modus mit dem initialen Passwort
-//    z.B. wenn das Passwort vergessen wurde
-#define CONFIG_PIN D0
-
-// -- MQTT Topic Prefix
-#define MQTT_TOPIC_PREFIX mqttTopicValue
-
-// -- Callback Deklarationen.
-void wifiConnected();
-void configSaved();
-boolean formValidator();
-void mqttSend(char const* mqtt_topic,char const* mqtt_content,bool mqttRetain);
+//Function prototypes
+void setupPins();
+void loadMaxCount();
 void up();
 void down();
-bool isNumeric(String str);
 void setMaxCount();
-void callback(char const* topic, byte* payload, unsigned int length);
 void newPosition(int newPercentage);
+void countPosition();
 void calibrationRun();
-char * addIntToChar(char* text, int i);
-
-DNSServer dnsServer;
-WebServer server(80);
-HTTPUpdateServer httpUpdater;
-WiFiClient wifiClient;
-
-
-char mqttServerValue[STRING_LEN];
-char mqttPortValue[STRING_LEN];
-char mqttUserValue[STRING_LEN];
-char mqttPasswordValue[STRING_LEN];
-char mqttTopicValue[STRING_LEN];
-char mqttUpTopic[STRING_LEN];
-char mqttDownTopic[STRING_LEN];
-char mqttPauseTopic[STRING_LEN];
-char mqttCalibrationTopic[STRING_LEN];
-char mqttPositionTopic[STRING_LEN];
-char mqttCountTopic[STRING_LEN];
-char mqttStateTopic[STRING_LEN];
-char mqttInfoTopic[STRING_LEN];
-char mqttOnlineStatusTopic[STRING_LEN];
-
-IotWebConf iotWebConf(thingName, &dnsServer, &server, wifiInitialApPassword, CONFIG_VERSION);
-IotWebConfSeparator separator2 = IotWebConfSeparator();
-IotWebConfParameter mqttServer = IotWebConfParameter("MQTT Server", "mqttServer", mqttServerValue, STRING_LEN);
-IotWebConfParameter mqttPort = IotWebConfParameter("MQTT Port", "mqttPort", mqttPortValue, STRING_LEN);
-IotWebConfParameter mqttUser = IotWebConfParameter("MQTT User", "mqttUser", mqttUserValue, STRING_LEN);
-IotWebConfParameter mqttPassword = IotWebConfParameter("MQTT Passwort", "mqttPassword", mqttPasswordValue, STRING_LEN, "password");
-IotWebConfParameter mqttTopic = IotWebConfParameter("MQTT Topic-Prefix", "mqttTopic", mqttTopicValue, STRING_LEN, "text", "z.B. GW60/Testraum");
+void setCurrentDirection();
+void sendCurrentPosition();
+void handlePosCertainty();
+void moveToNewPos();
+void handleCalibration();
+void set_window_covering_position(esp_matter_attr_val_t *current);
+void set_onoff_attribute_value(esp_matter_attr_val_t *onoff_value, uint16_t plugin_unit_endpoint_id_1);
+void set_operational_state(chip::EndpointId endpoint, OperationalState newState);
 
 
-// -- MQTT
-char const* mqtt_server = mqttServerValue;
-char const* mqtt_username = mqttUserValue;
-char const* mqtt_password = mqttPasswordValue;
-char const* mqtt_clientID = iotWebConf.getThingName();
-char message_buff[100];
-bool mqttRetain = false;
-int mqttQoS = 0;
-int mqtt_port = 1883;
+/*********************************************************************************
+ * * * MATTER FUNCTIONS
+ *********************************************************************************/
 
-// -- Variablen
-int dir = 0, count = 0, maxCount, newCount = 0, lastSendPercentage = 0;
-float percentage = 0;
-bool remote = false, needReset = false, posCertain = false, calMode = false, calUp = false, calDown = false, lastSendPercentageInit = false, newCountInit = false, maxCountInit = false, countRetrived = false, counted = false, posChange = false,posRunUp = false, posRunDown = false;
-byte value;
+static void on_device_event(const ChipDeviceEvent *event, intptr_t arg) {}
 
-/*
-*
-*Mqtt Funktionen
-*
-*/
-PubSubClient client(mqtt_server, mqtt_port, callback, wifiClient); // -- MQTT initialisieren
-
-boolean reconnect() {  // -- MQTT Reconnect
-  boolean connected = false;
-  // -- 3 Verbindungsversuche, dann Neustart
-  for(int i = 0; i<2;i++){ 
-    if(client.connected()) {
-    connected = true;
-    break;
-    }
-    DEBUGPRINTLN1("Versuche MQTT-Verbindung aufzubauen... ");
-    // -- Versuche Neu-Verbindung
-    if (client.connect(mqtt_clientID, mqtt_username, mqtt_password, mqttOnlineStatusTopic,1, true, "false")) {
-
-      //Stellt sicher, dass ein Minimum an interaktive Topics erstellt werden
-      mqttSend(mqttUpTopic, "false", mqttRetain);
-      mqttSend(mqttDownTopic, "false", mqttRetain);
-      mqttSend(mqttPauseTopic, "false", mqttRetain);
-      mqttSend(mqttCalibrationTopic, "false", mqttRetain);
-      /*
-      ---toDo---
-      sprintf(bufIP, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3])
-      mqttSend(mqttIpTopic, wifiClient.localIP()., mqttRetain);
-      */
-      if(maxCountInit){
-        mqttSend(mqttInfoTopic, addIntToChar("Endpositon geladen: ",maxCount), mqttRetain);
-      }
-      else{
-        mqttSend(mqttInfoTopic, "Kalibrierung erforderlich!", mqttRetain);
-      }
-      // -- Re-Abonnierung
-      client.subscribe(mqttPositionTopic, mqttQoS);
-      client.subscribe(mqttUpTopic, mqttQoS);
-      client.subscribe(mqttDownTopic, mqttQoS);
-      client.subscribe(mqttPauseTopic, mqttQoS);
-      client.subscribe(mqttCalibrationTopic, mqttQoS);
-      client.subscribe(mqttCountTopic, mqttQoS);
-
-      DEBUGPRINTLN1("Mqtt Initialisiert");
-      DEBUGPRINTLN2("aktueller maxCount: "+String(maxCount));
-    }
-    else {
-      DEBUGPRINTLN1("fehlgeschlagen, rc=");
-      DEBUGPRINTLN1(client.state());
-      DEBUGPRINTLN3(" versuche erneut");
-      //Warte 1 Sekunden vor erneutem Versuch
-      delay(1000);
-    }
-  }
-  return connected;
-}
-
-//MQTT Callback Funktion
-void callback(char const* topic, byte* payload, unsigned int length) {  
-  int i = 0; 
-  for(i=0; i<length; i++) {
-    message_buff[i] = payload[i];
-  }
-  message_buff[i] = '\0';
-  String message = String(message_buff); // -- in String umwandeln
-
-  DEBUGPRINTLN2("Neue Nachricht empfangen ["+String(topic)+", "+message+"]");
-
-  //Fängt retained message auf um letzte bekannten count zu erhalten
-  //wird nur 1x ausgeführt
-  if(!countRetrived && strcmp(topic, mqttCountTopic) == 0){
-    if(isNumeric(message)){
-      int tmpCount = message.toInt();
-      //stellt sinnvollen Wert sicher
-      if(tmpCount >=0){
-        count = tmpCount;
-      }
-      DEBUGPRINTLN1("count retrieved: "+String(count));
-    }
-    countRetrived = true;
-  }
-  //Positionsbefehl
-  else if(strcmp(topic, mqttPositionTopic) == 0 && dir == 0 &&isNumeric(message)){
-    newPosition(message.toInt());
-  }
-  //Topic zum kompletten hochfahren
-  else if(strcmp(topic, mqttUpTopic) == 0){
-    if(posRunUp || posRunDown){
-      return;
-    }
-    if (message.equals("true")) {
-      remote = false;
-      up();
-      mqttSend(mqttUpTopic, "false", mqttRetain);
-    }
-  }
-  //Topic zum kompletten runterfahren
-  else if(strcmp(topic, mqttDownTopic) == 0){
-    if(posRunUp || posRunDown){
-      return;
-    }
-    if (message.equals("true")) {
-      remote = false;
-      down();
-      mqttSend(mqttDownTopic, "false", mqttRetain);
-    }
-  }
-  //Topic zum pausieren der aktuellen Aktion
-  else if(strcmp(topic, mqttPauseTopic) == 0){
-    if (message.equals("true")) {
-      if(posRunUp || posRunDown){
-        return;
-      }
-      remote = false;
-      if (dir == -1) {
-        down();    
-      } else if (dir == 1) {
-        up();
-      }
-      mqttSend(mqttPauseTopic, "false", mqttRetain);
-    }
-  }
-  //Topic zum Starten einer Kalibrierungsfahrt
-  else if(strcmp(topic, mqttCalibrationTopic) == 0){
-    if (message.equals("true")) {
-      calibrationRun();
-      mqttSend(mqttCalibrationTopic, "false", mqttRetain);
-    }
-  }
-}
-
-//Senden mit Verbindungscheck
-void mqttSend(char const* mqtt_topic,char const* mqtt_content,bool mqttRetain) {  // MQTT Sende-Routine
-  if (client.publish(mqtt_topic, mqtt_content, mqttRetain)) {
-    DEBUGPRINTLN1("Nachricht gesendet: "+String(mqtt_topic)+", "+mqtt_content);
-  }
-  else if(client.connected()) {
-    client.publish(mqtt_topic, mqtt_content, mqttRetain);
-    DEBUGPRINTLN1("Nachricht gesendet bei 2. Versuch: "+String(mqtt_topic)+", "+String(mqtt_content));
-  }
-  else if(reconnect()){
-    client.publish(mqtt_topic, mqtt_content, mqttRetain);
-  }
-  else{
-    needReset = true;
-    DEBUGPRINTLN1("Sendung fehlgeschlagen: "+String(mqtt_topic)+", "+String(mqtt_content));
-  }
-}
-
-//Prüfen, ob der empfangene Wert nummerisch ist
-boolean isNumeric(String str) {  
-  if(!str){
-    return false;
-  }
-
-  if (str.length() == 0) {
-    return false;
-  }
-
-  boolean seenDecimal = false;
-
-  for(unsigned int i = 0; i < str.length(); ++i) {
-    if (isDigit(str.charAt(i))) {
-      continue;
-    }
-    if (str.charAt(i) == '.') {
-      if (seenDecimal) {
-        return false;
-      }
-      seenDecimal = true;
-      continue;
-    }
-    return false;
-  }
-  return true;
+static esp_err_t on_identification(identification::callback_type_t type, uint16_t endpoint_id, uint8_t effect_id, uint8_t effect_variant, void *priv_data) {
+  return ESP_OK;
 }
 
 
-void setupMqtt(){
-  // -- Setze MQTT Callback-Funktion
-  client.setCallback(callback);
-  
-  // -- Bereite dynamische MQTT-Topics vor
-  String temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/open";
-  temp.toCharArray(mqttUpTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/close";
-  temp.toCharArray(mqttDownTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/pause";
-  temp.toCharArray(mqttPauseTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/state";
-  temp.toCharArray(mqttStateTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/info";
-  temp.toCharArray(mqttInfoTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/calibration";
-  temp.toCharArray(mqttCalibrationTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/position";
-  temp.toCharArray(mqttPositionTopic, STRING_LEN); 
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/alive";
-  temp.toCharArray(mqttOnlineStatusTopic, STRING_LEN);
-  temp = String(MQTT_TOPIC_PREFIX);
-  temp += "/count";
-  temp.toCharArray(mqttCountTopic, STRING_LEN);
-}
-/*
-*
-*Gurtwickler Programm
-*
-*/
+// Sets the value of the WindowCovering attribute for the target position from the app
+// and reads the On/Off attribute value Calibration mode ON/OFF
+static esp_err_t on_attribute_update(attribute::callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id,
+                                     uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data) {
+  if (type == attribute::PRE_UPDATE) {
+    if (endpoint_id == window_covering_endpoint_id && cluster_id == WINDOW_COVERING_CLUSTER_ID && attribute_id == WINDOW_COVERING_ATTRIBUTE_ID_TARGET) {
+      // Extract new target position from the attribute value
+      int new_target_position = val->val.i;
 
-//Funktion für hoch
+      // Conversion from the transfer value 10000 to 100% percent
+      int new_position_in_counts = new_target_position / 100;
+
+      // Transfer of the new position value to the existing function
+      newPosition(new_position_in_counts);
+
+      DEBUGPRINTLN2("[BELTWINDER] newPosition function called with new target position: " + String(new_position_in_counts));
+    } else if (cluster_id == CLUSTER_ID && attribute_id == ATTRIBUTE_ID) {
+      // We got a Calibration Switch on/off attribute update!
+      calButton = val->val.b;
+
+      if (calButton) {
+        DEBUGPRINTLN2("[BELTWINDER] Calibration On attribute value read successfully");
+        calibrationRun();
+
+      } else {
+        // If the calibration switch is switched off (OFF), output a debug message
+        DEBUGPRINTLN2("[BELTWINDER] Calibration Off attribute value read successfully");
+        calButton = false;
+        calMode = false;
+        calUp = false;
+      }
+    }
+  }
+  return ESP_OK;
+}
+
+// Reads calibration switch on/off attribute value
+esp_matter_attr_val_t get_onoff_attribute_value() {
+  esp_matter_attr_val_t onoff_value = esp_matter_invalid(NULL);
+  attribute::get_val(attribute_ref_1, &onoff_value);
+  return onoff_value;
+}
+
+// Sets the value of the WindowCovering attribute for the current position (both target and current attributes must be sent!)
+void set_window_covering_position(esp_matter_attr_val_t *current)
+{    
+    attribute::update(window_covering_endpoint_id, WINDOW_COVERING_CLUSTER_ID, WINDOW_COVERING_ATTRIBUTE_ID_CURRENT, current);
+    attribute::update(window_covering_endpoint_id, WINDOW_COVERING_CLUSTER_ID, WINDOW_COVERING_ATTRIBUTE_ID_TARGET, current);
+}
+
+// Sends the on / off command to the app
+void set_onoff_attribute_value(esp_matter_attr_val_t* onoff_value) {
+  attribute::update(switch_endpoint_id_1, CLUSTER_ID, ATTRIBUTE_ID, onoff_value);
+}
+
+void set_operational_state(chip::EndpointId endpoint, OperationalState newState)
+{
+    esp_matter_attr_val_t stateValue;
+    stateValue = esp_matter_int8(static_cast<int8_t>(newState));
+
+    esp_err_t result = attribute::update(window_covering_endpoint_id, WINDOW_COVERING_CLUSTER_ID, WINDOW_COVERING_ATTRIBUTE_ID_OPERATE, &stateValue);
+
+    if (result == ESP_OK)
+    {
+        DEBUGPRINTLN2("[BELTWINDER] Operational State updated successfully");
+    }
+    else
+    {
+        DEBUGPRINTLN2("[BELTWINDER] Failed to update Operational State");
+        // Handle error if needed
+    }
+}
+
+
+
+/*********************************************************************************
+ * * * MATTER SETUP FUNCTIONS
+ *********************************************************************************/
+
+void set_window_covering_mode(chip::EndpointId endpoint, chip::app::Clusters::WindowCovering::Mode newMode)
+{
+    esp_matter_attr_val_t modeValue;
+    modeValue = esp_matter_int8(static_cast<int8_t>(newMode));
+
+    esp_err_t result = attribute::update(window_covering_endpoint_id, WINDOW_COVERING_CLUSTER_ID, WINDOW_COVERING_ATTRIBUTE_ID_MODE, &modeValue);
+
+    if (result == ESP_OK)
+    {
+        DEBUGPRINTLN2("[BELTWINDER] Window covering Mode updated successfully");
+        chip::DeviceLayer::PlatformMgr().LockChipStack();
+        DEBUGPRINTLN2("[BELTWINDER] Current Mode: "); ModePrint(ModeGet(window_covering_endpoint_id));
+        chip::DeviceLayer::PlatformMgr().UnlockChipStack();
+    }
+    else
+    {
+        DEBUGPRINTLN2("[BELTWINDER] Failed to update window covering Mode");
+        // Handle error if needed
+    }
+}
+
+
+void set_window_covering_configstatus(chip::EndpointId endpoint, ConfigStatus newConfigStatus)
+{
+    esp_matter_attr_val_t ConfigStatusValue;
+    ConfigStatusValue = esp_matter_int8(static_cast<int8_t>(newConfigStatus));
+
+    esp_err_t result = attribute::update(window_covering_endpoint_id, WINDOW_COVERING_CLUSTER_ID, WINDOW_COVERING_ATTRIBUTE_ID_CONFIG, &ConfigStatusValue);
+
+    if (result == ESP_OK)
+    {
+        DEBUGPRINTLN2("[BELTWINDER] Window covering ConfigStatus updated successfully");
+
+        // Handle Type attribute change
+        chip::DeviceLayer::PlatformMgr().LockChipStack();
+        ConfigStatusSet(endpoint, static_cast<ConfigStatus>(newConfigStatus));
+        chip::DeviceLayer::PlatformMgr().UnlockChipStack();
+    }
+    else
+    {
+        DEBUGPRINTLN2("[BELTWINDER] Failed to update window covering ConfigStatus");
+        // Handle error if needed
+    }
+}
+
+
+void set_window_covering_type(chip::EndpointId endpoint, Type newType)
+{
+    esp_matter_attr_val_t typeValue;
+    typeValue = esp_matter_int8(static_cast<int8_t>(newType));
+
+    esp_err_t result = attribute::update(window_covering_endpoint_id, WINDOW_COVERING_CLUSTER_ID, WINDOW_COVERING_ATTRIBUTE_ID_TYPE, &typeValue);
+
+    if (result == ESP_OK)
+    {
+        DEBUGPRINTLN2("[BELTWINDER] Window covering Type updated successfully");
+
+        // Handle Type attribute change
+        chip::DeviceLayer::PlatformMgr().LockChipStack();
+        TypeSet(endpoint, newType);
+        chip::DeviceLayer::PlatformMgr().UnlockChipStack();
+    }
+    else
+    {
+        DEBUGPRINTLN2("[BELTWINDER] Failed to update window covering Type");
+        // Handle error if needed
+    }
+}
+
+
+void set_window_covering_endtype(chip::EndpointId endpoint, EndProductType newEndType)
+{
+    esp_matter_attr_val_t endTypeValue;
+    endTypeValue = esp_matter_int8(static_cast<int8_t>(newEndType));
+
+    esp_err_t result = attribute::update(window_covering_endpoint_id, WINDOW_COVERING_CLUSTER_ID, WINDOW_COVERING_ATTRIBUTE_ID_ENDTYPE, &endTypeValue);
+
+    if (result == ESP_OK)
+    {
+        DEBUGPRINTLN2("[BELTWINDER] Window covering Endtype updated successfully");
+
+        // Handle Type attribute change
+        chip::DeviceLayer::PlatformMgr().LockChipStack();
+        EndProductTypeSet(endpoint, static_cast<EndProductType>(newEndType));
+        chip::DeviceLayer::PlatformMgr().UnlockChipStack();
+    }
+    else
+    {
+        DEBUGPRINTLN2("[BELTWINDER] Failed to update window covering Endtype");
+        // Handle error if needed
+    }
+}
+
+void set_window_covering_safetystatus(chip::EndpointId endpoint, SafetyStatus newSafetyStatus)
+{
+    esp_matter_attr_val_t safetyStatusValue;
+    safetyStatusValue = esp_matter_int8(static_cast<int8_t>(newSafetyStatus));
+
+    esp_err_t result = attribute::update(window_covering_endpoint_id, WINDOW_COVERING_CLUSTER_ID, WINDOW_COVERING_ATTRIBUTE_ID_SAFETY, &safetyStatusValue);
+
+    if (result == ESP_OK)
+    {
+        DEBUGPRINTLN2("[BELTWINDER] Window covering SafetyStatus updated successfully");
+
+        // Handle Type attribute change
+        chip::DeviceLayer::PlatformMgr().LockChipStack();
+        SafetyStatusSet(endpoint, static_cast<SafetyStatus>(newSafetyStatus));
+        chip::DeviceLayer::PlatformMgr().UnlockChipStack();
+    }
+    else
+    {
+        DEBUGPRINTLN2("[BELTWINDER] Failed to update window covering SafetyStatus");
+        // Handle error if needed
+    }
+}
+
+
+/*********************************************************************************
+ * * * SETUP
+ *********************************************************************************/
+void setup() {
+  Serial.begin(115200);
+  esp_log_level_set("*", ESP_LOG_NONE);
+
+  DEBUGPRINTLN1("[BELTWINDER] Start");
+
+  setupPins();
+
+  //read stored maxCount value from the memory
+  loadMaxCount();
+
+  // Create Matter node
+  node::config_t node_config;
+  on_off_light::config_t light_config;
+  node_t *node = node::create(&node_config, on_attribute_update, on_identification);
+
+  // Create Window Covering device
+  window_covering_device::config_t window_config;
+  endpoint_t *endpoint = window_covering_device::create(node, &window_config, ENDPOINT_FLAG_NONE, NULL);
+  endpoint_t *plugin_unit_endpoint_id_1 = on_off_light::create(node, &light_config, ENDPOINT_FLAG_NONE, NULL);
+
+  // Get attribute reference
+  attribute_ref_target = attribute::get(cluster::get(endpoint, WINDOW_COVERING_CLUSTER_ID), WINDOW_COVERING_ATTRIBUTE_ID_TARGET);
+  attribute_ref_1 = attribute::get(cluster::get(endpoint, CLUSTER_ID), ATTRIBUTE_ID);
+
+  // Get endpoint ID
+  window_covering_endpoint_id = endpoint::get_id(endpoint);
+
+  // Configure Window Covering cluster features
+  cluster_t *cluster = cluster::get(endpoint, WindowCovering::Id);
+  cluster::window_covering::feature::lift::config_t lift;
+  cluster::window_covering::feature::position_aware_lift::config_t position_aware_lift;
+  nullable<uint8_t> percentage = nullable<uint8_t>(0);
+    nullable<uint16_t> percentage_100ths = nullable<uint16_t>(0);
+    //position_aware_lift.current_position_lift_percentage = percentage;
+    position_aware_lift.target_position_lift_percent_100ths = percentage_100ths;
+    position_aware_lift.current_position_lift_percent_100ths = percentage_100ths;
+  cluster::window_covering::feature::lift::add(cluster, &lift);
+  cluster::window_covering::feature::position_aware_lift::add(cluster, &position_aware_lift);
+
+  // Setup DAC (this is good place to also set custom commission data, passcodes etc.)
+  //esp_matter::set_custom_dac_provider(chip::Credentials::Examples::GetExampleDACProvider());
+   
+  // Start Matter
+  esp_matter::start(on_device_event);
+
+  // Attribute: Id  0 Type
+  //set_window_covering_type(window_covering_endpoint_id, Type::kShutter);
+
+  // Attribute: Id  7 ConfigStatus
+  //set_window_covering_configstatus(window_covering_endpoint_id, ConfigStatus::kLiftEncoderControlled);
+
+  // Attribute: Id 13 EndProductType
+  set_window_covering_endtype(window_covering_endpoint_id, EndProductType::kRollerShutter);
+
+  // Attribute: Id 23 Mode
+  set_window_covering_mode(window_covering_endpoint_id, Mode::kMotorDirectionReversed);
+  //set_window_covering_mode(window_covering_endpoint_id, Mode::kCalibrationMode);
+  //set_window_covering_mode(window_covering_endpoint_id, Mode::kMaintenanceMode);
+  //set_window_covering_mode(window_covering_endpoint_id, Mode::kLedFeedback);
+
+  // Attribute: Id 26 SafetyStatus (Optional)
+  chip::BitFlags<SafetyStatus> safetyStatus(0x00); // 0 is no issues;
+  //set_window_covering_safetystatus(window_covering_endpoint_id, SafetyStatus::kPositionFailure);
+
+  // Print onboarding codes
+  PrintOnboardingCodes(chip::RendezvousInformationFlags(chip::RendezvousInformationFlag::kBLE));
+
+  // -- So, alles erledigt... kann los gehen
+  DEBUGPRINTLN1("[BELTWINDER] Initialization completed.");
+}
+
+
+/*********************************************************************************
+ * * * LOOP
+ *********************************************************************************/
+void loop() {
+
+  //Count current position
+  countPosition();
+
+  //Determine current direction
+  setCurrentDirection();
+
+  //Set whether current position is unique
+  handlePosCertainty();
+
+  //Send current position to App
+  sendCurrentPosition();
+
+  //Move to new position
+  moveToNewPos();
+
+  //Execute calibration run
+  handleCalibration();
+
+}
+
+
+/*********************************************************************************
+ * * * GURTWICKLER PROGRAMM
+ *********************************************************************************/
+
+// Function for up
 void up() {
-  if (dir != -1){
-    if(!calMode && !posCertain){
+  DEBUGPRINTLN2("[BELTWINDER] Entering up() function.");
+
+  if (dir != -1) {
+    DEBUGPRINTLN2("[BELTWINDER] Direction is not -1.");
+
+    if (!calMode && !posCertain) {
+      DEBUGPRINTLN2("[BELTWINDER] Not in calibration mode and position is not certain.");
+
       posRunUp = true;
     }
-    //Simulierter Tastendruck "up"
-    digitalWrite(D2, LOW);
+
+    // Simulated button press "up"
+    DEBUGPRINTLN2("[BELTWINDER] Simulating button press for 'up'.");
+    digitalWrite(BUTTON_UP, LOW);
     delay(300);
-    digitalWrite(D2, HIGH);
+    digitalWrite(BUTTON_UP, HIGH);
     delay(500);
-  }   
+  } else {
+    DEBUGPRINTLN2("[BELTWINDER] Direction is -1, 'up()' function skipped.");
+  }
+
+  DEBUGPRINTLN2("[BELTWINDER] Exiting up() function.");
 }
 
-//Funktion für runter
-void down() { 
-  if (dir != 1){
-    if(!calMode && !posCertain){
+
+// Function for down
+void down() {
+  DEBUGPRINTLN2("[BELTWINDER] Entering down() function.");
+
+  if (dir != 1) {
+    DEBUGPRINTLN2("[BELTWINDER] Direction is not 1.");
+
+    if (!calMode && !posCertain) {
+      DEBUGPRINTLN2("[BELTWINDER] Not in calibration mode and position is not certain.");
+
       posRunDown = true;
     }
-    //Simulierter Tastendruck "down"
-    digitalWrite(D1, LOW);
+
+    // Simulated button press "down"
+    DEBUGPRINTLN2("[BELTWINDER] Simulating button press for 'down'.");
+    digitalWrite(BUTTON_DOWN, LOW);
     delay(300);
-    digitalWrite(D1, HIGH);
+    digitalWrite(BUTTON_DOWN, HIGH);
     delay(500);
+  } else {
+    DEBUGPRINTLN2("[BELTWINDER] Direction is 1, 'down()' function skipped.");
   }
+
+  DEBUGPRINTLN2("[BELTWINDER] Exiting down() function.");
 }
 
-//Speicherung der unteren Position
-void setMaxCount() {
-  if(count>0){
-    //Speicher count-Wert
-    EEPROM.write(10, count);
-    //Speicher maxCount init-Flag
-    EEPROM.write(11, 19);
-    EEPROM.write(12, 92);
-    EEPROM.write(13, 42);
-    EEPROM.commit();
-    maxCount = EEPROM.read (10);
+// Saving the lower position
+void setMaxCount()
+{
+    if (count > 0)
+    {
+        // Save maxCount value
+        CHIP_ERROR err = chip::DeviceLayer::PersistedStorage::KeyValueStoreMgr().Put(kMaxCountKey, &count, sizeof(count));
+        if (err == CHIP_NO_ERROR)
+        {
+            maxCount = count;
 
-    posCertain = true;
-    maxCountInit = true;
-    DEBUGPRINTLN1("Neuer maximaler Count gesetzt:"+String(maxCount)+"]");
-    mqttSend(mqttInfoTopic, addIntToChar("Neue maximale Position gesetzt. count: ",maxCount), mqttRetain);
-  }
-  else{
-    mqttSend(mqttInfoTopic, addIntToChar("Maximaler Count fehlerhaft: ",count), mqttRetain);
-    DEBUGPRINTLN1("Maximaler Count fehlerhaft:"+String(maxCount)+"]");
-  }
+            posCertain = true;
+            maxCountInit = true;
+            DEBUGPRINTLN2("New maximum count set: " + String(maxCount) + "]");
+            posChange = true;
+            sendCurrentPosition();
+
+            // Calibration completed, send "false" to the app
+            esp_matter_attr_val_t onoff_value = get_onoff_attribute_value();
+            onoff_value.val.b = !onoff_value.val.b;
+            set_onoff_attribute_value(&onoff_value);
+        }
+        else
+        {
+            
+        }
+    }
+    else
+    {
+        DEBUGPRINTLN2("Maximum count incorrect: " + String(maxCount) + "]");
+    }
 }
 
 
-/*
-int unCounted = 0;
-//Überwacht den Sensor und meldet Probleme
-void sensorGuard(){
-  if((digitalRead(D3) || digitalRead(D4)&&!posChange){
-    bewegungOhneImpuls++;
-  }
-  else{
-    bewegungOhneImpuls=0;
-  }
-  if(bewegungOhneImpuls>5){
-    mqttSend(mqttInfoTopic,"Sensorfehler. Es werden keine Impulse gezählt.");
-  }
-}
-*/
-
-//Zählen der Positions-Impulse
 void countPosition(){
-  //sensorGuard();
-  if (digitalRead(D5) == LOW && digitalRead(D3) == HIGH && dir == 1 && !counted) {
+  if (digitalRead(PULSECOUNTER) == LOW && digitalRead(MOTOR_UP) == HIGH && dir == 1 && !counted) {
     count++;
-    DEBUGPRINTLN3("Neuer count: " + String(count));
+    DEBUGPRINTLN2("[BELTWINDER] new count (MOTOR_DOWN): " + String(count));
     if(!calMode && count > maxCount){
       count = maxCount;
     }
-    counted = true; //sicherstellen, dass nur einmal pro LOW-Impuls gezählt wird
-    posChange = true; //Erfassen, dass sich die Position verändert hat
-    
+    counted = true; //sure that counting only takes place once per LOW pulse
+    posChange = true; //Detect that the position has changed
   } 
-  else if (digitalRead(D5) == LOW && digitalRead(D4) == HIGH && dir == -1 && !counted) {
+  else if (digitalRead(PULSECOUNTER) == LOW && digitalRead(MOTOR_DOWN) == HIGH && dir == -1 && !counted) {
     if (count > 0){
       count--;
     }
-    DEBUGPRINTLN3("Neuer count: " + String(count));
-    counted = true; // -- sicherstellen, dass nur einmal pro LOW-Impuls gezählt wird
-    posChange = true; //Erfassen, dass sich die Position verändert hat
-  } else if (digitalRead(D5) == HIGH && counted == true) {
+    DEBUGPRINTLN2("[BELTWINDER] new count (MOTOR_UP): " + String(count));
+    counted = true; //sure that counting only takes place once per LOW pulse
+    posChange = true; //Detect that the position has changed
+  } else if (digitalRead(PULSECOUNTER) == HIGH && counted == true) {
     counted = false;
   }
 }
 
 
-//aktuelle Position per MQTT senden
-void sendCurrentPosition(){
-  //Wert nur senden, wenn geändert und stillstand
-  if(!posChange || dir != 0){
-    return;
-  }
-  //count Wert
-  char ccount[4];
-  itoa( count, ccount, 10 );
-  mqttSend(mqttCountTopic, ccount, true);
-  if(maxCountInit){
-    //Prozentwert
-    // -- Prozentwerte berechen
-    int percentage = count / (maxCount * 0.01);
-    lastSendPercentage = percentage;
-    char cpercentage[5];
-    itoa( percentage, cpercentage, 10 );
-    mqttSend(mqttPositionTopic, cpercentage, false);
-    lastSendPercentageInit = true;
-  }
-  posChange = false;
+void sendCurrentPosition()
+{
+    //Send value only if changed and standstill
+    if (!posChange || dir != 0)
+    {
+        return;
+    }
+
+    if (maxCountInit)
+    {
+        //Percentage value
+        // -- Calculate percentage values
+        int percentage = count / (maxCount * 0.01);
+        lastSendPercentage = percentage;
+
+        DEBUGPRINTLN2("[BELTWINDER] sendCurrentPosition: Send current position to the app: " + String(percentage) + "%");
+
+        // Update the attribute with the current percentage value
+        int16_t current_position = percentage * 100;
+        esp_matter_attr_val_t current = esp_matter_int16(current_position);
+
+        // Call the function to set the WindowCovering attribute for the position
+        set_window_covering_position(&current);
+
+        lastSendPercentageInit = true;
+        DEBUGPRINTLN2("[BELTWINDER] sendCurrentPosition: Last sent percentage initialized.");
+    }
+    posChange = false;
+    DEBUGPRINTLN2("[BELTWINDER] sendCurrentPosition: PosChange reset.");
 }
 
-// MQTT-Übertragung der aktuellen (geänderten) Richtung
+
+// Transmission of the current (changed) direction
 void setCurrentDirection() {
-  if (digitalRead(D4) == LOW && dir != 1) {
-    mqttSend(mqttStateTopic, "Schliessen", mqttRetain);
+  if (digitalRead(MOTOR_DOWN) == LOW && dir != 1) {
     dir = 1;
-  } else if (digitalRead(D3) == LOW && dir != -1) {
-    mqttSend(mqttStateTopic, "Öffnen", mqttRetain);
+    set_operational_state(window_covering_endpoint_id, OperationalState::MovingDownOrClose);
+    DEBUGPRINTLN2("[BELTWINDER] Direction (DOWN) updated: Close");
+  } else if (digitalRead(MOTOR_UP) == LOW && dir != -1) {
     dir = -1;
-  } else if (digitalRead(D4) == HIGH && digitalRead(D3) == HIGH && dir != 0) {
-    mqttSend(mqttStateTopic, "Inaktiv", mqttRetain);
+    set_operational_state(window_covering_endpoint_id, OperationalState::MovingUpOrOpen);
+
+    DEBUGPRINTLN2("[BELTWINDER] Direction (UP) updated: Open");
+  } else if (digitalRead(MOTOR_DOWN) == HIGH && digitalRead(MOTOR_UP) == HIGH && dir != 0) {
     dir = 0;
     delay(1000);
+    set_operational_state(window_covering_endpoint_id, OperationalState::Stall);
+    DEBUGPRINTLN2("[BELTWINDER] Direction updated: Inactive");
   }
 }
 
-//Logik für Positionsanfragen in %
-void newPosition(int newPercentage){
-    //Filterversuch für eigene publishes --> MQTT5.0 Feature
-    if(lastSendPercentageInit && lastSendPercentage == newPercentage){
-      return;
+
+void newPosition(int newPercentage) {
+    unsigned long currentTime = millis();
+
+    bufferedPercentage = newPercentage;
+    DEBUGPRINTLN2("[BELTWINDER] newPosition: New percentage received - " + String(newPercentage) + "%");
+
+    if (lastUpdateTime == 0) {
+        lastUpdateTime = currentTime;
+        DEBUGPRINTLN2("[BELTWINDER] lastUpdateTime: New timestamp - " + String(lastUpdateTime) + "ms");
     }
-    //Ignoriert Eingaben, wenn Kalibrierung stattfindet, es noch keinen maxCount gibt, oder gerade eine neue Postion angefahren wird
-    if(calMode || !maxCountInit || remote){
-      return;
+
+    // Buffer the value when enough time has passed
+    if (currentTime - lastUpdateTime < filterDuration) {
+      DEBUGPRINTLN2("[BELTWINDER] currentTime: New timestamp - " + String(currentTime) + "ms");
+        bufferedPercentage = newPercentage;
+         DEBUGPRINTLN2("[BELTWINDER] Buffering the value during the buffer time - Value: " + String(bufferedPercentage) + ", Time: " + String(currentTime - lastUpdateTime) + " ms");
+         return;
+    } else {
+        // Time has expired, use the last buffered value
+        DEBUGPRINTLN2("[BELTWINDER] Time limit for buffering exceeded. Use last buffered value.");
+        filteredPercentage = bufferedPercentage;
+        
+        DEBUGPRINTLN2("[BELTWINDER] newPosition: Filtered percentage - " + String(filteredPercentage));
+
+        lastUpdateTime = 0; // Set lastUpdateTime to 0 for the next update
     }
-    //Sanity check
-    if(newPercentage<0 || newPercentage>100){
-      return;
+
+    // Filter for own publishes
+    if (lastSendPercentageInit && lastSendPercentage == filteredPercentage) {
+        return;
     }
-    //setze neuen Soll-Wert
-    newCount = int ((float (newPercentage)/100*maxCount)+0.5);
+
+    // Ignores inputs if calibration is taking place, there is no maxCount yet, or a new position is currently being approached
+    if (calMode || !maxCountInit || remote) {
+        return;
+    }
+
+    // Sanity check
+    if (filteredPercentage < 0 || filteredPercentage > 100) {
+        DEBUGPRINTLN2("[BELTWINDER] newPosition: Invalid percentage. Action is skipped.");
+        return;
+    }
+
+    // Set new target value
+    newCount = int((float(filteredPercentage) / 100 * maxCount) + 0.5);
     newCountInit = true;
-    if(newCount==maxCount){
-      down();
-    }
-    else if(newCount==0){
-      up();
-    }
-    else{
-      //Prüft ob ein Endanschlag seit boot angefahren wurde
-      if(!posCertain){
-        //kürzeste Strecke zum neuen Punkt mit Halt bei Endstellung
-        //(maxCount-Count):Strecke nach unten
-        //(maxCount-NewCount):Strecke von unten zur neuen Position
-        //count: Strecke nach oben
-        //newCount: Stecke von oben zur neuen Position
-        if((2*maxCount-count-newCount) >= count+newCount){
-          up();
+
+    DEBUGPRINTLN2("[BELTWINDER] newPosition: New Count value - " + String(newCount));
+
+    if (newCount == maxCount) {
+        down();
+        DEBUGPRINTLN2("[BELTWINDER] newPosition: New target value corresponds to the maximum counter value. Action - down()");
+    } else if (newCount == 0) {
+        up();
+        DEBUGPRINTLN2("[BELTWINDER] newPosition: New target value is 0. action - up()");
+    } else {
+        // Checks whether an end stop has been approached since the boat
+        if (!posCertain) {
+            // Shortest distance to the new point with stop at end position
+            // (maxCount-Count):Distance downwards
+            // (maxCount-NewCount):Distance from the bottom to the new position
+            // count: Distance upwards
+            // newCount: Distance from the top to the new position
+            if ((2 * maxCount - count - newCount) >= count + newCount) {
+                up();
+                DEBUGPRINTLN2("[BELTWINDER] newPosition: Shortest distance to the new position - up()");
+            } else {
+                down();
+                DEBUGPRINTLN2("[BELTWINDER] newPosition: Shortest distance to the new position - down()");
+            }
         }
-        else{
-          down();
-        }
-      }
-      remote = true;
+        remote = true;
+        DEBUGPRINTLN2("[BELTWINDER] newPosition: Remote control activated.");
     }
 }
 
-//Fährt neuen Positionswert an
+
+
+//Moves to new position value
 void moveToNewPos() {
-  //Wird nicht ausgeführt wenn eine Positionsfahrt im Gange ist und eine neue Positon definiert wurde
+  //Will not be executed if a position run is in progress and a new position has been defined
   if(!remote || posRunUp || posRunDown){
     return;
   }
-  //Stellt sicher, dass ein Wert eingegangen ist
+  //Secures that a value has been received
   if(!newCountInit){
     remote = false;
     return;
   }
   if(newCount > count){
-    //wenn neuer Wert größer als aktueller ist und Rollladen aktuell gestoppt, dann starten
+    //if new value is greater than current value and roller shutter is currently stopped, then start
     if(dir == 0){
       down(); // --start
-      DEBUGPRINTLN2("Neuer Prozentwert unterscheidet sich, fahre runter");
+      DEBUGPRINTLN2("[BELTWINDER] New percentage value differs, drive down");
     }
-    //wenn aktueller Wert kleiner als neuer ist und momentan nach oben gefahren wird, dann stopp
+    //if current value is less than new value and is currently being moved upwards, then stop
     else if(dir == -1){
-      down(); // -- stope jetzt
-      DEBUGPRINTLN2("Neuer Prozentwert ist gleich, stoppe jetzt");
+      down(); // -- stope now
+      DEBUGPRINTLN2("[BELTWINDER] New percentage value is equal, stop now");
       remote = false;
     }
   }
   else if(newCount < count){
-    // -- wenn neuer Wert kleiner als aktueller ist und Rollladen aktuell gestoppt, dann starten
+    // -- if new value is less than current value and roller shutter is currently stopped, then start
     if(dir == 0){
       up(); // -- start
-      DEBUGPRINTLN2("Neuer Prozentwert unterscheidet sich, fahre hoch");
+      DEBUGPRINTLN2("[BELTWINDER] New percentage value differs, drive up");
     }
-    // -- wenn aktueller Wert größer als neuer ist und momentan nach unten gefahren wird, dann stopp
+    // -- if the current value is greater than the new value and is currently being lowered, then stop
     else if(dir == 1){
-      up(); // -- stoppe jetzt
-      DEBUGPRINTLN2("Neuer Prozentwert ist gleich, stoppe jetzt");
+      up(); // -- stop now
+      DEBUGPRINTLN2("[BELTWINDER] New percentage value is equal, stop now");
       remote = false;
     }
   }
@@ -523,31 +659,33 @@ void moveToNewPos() {
     remote = false;
     if(dir ==1){
       up();  //stop
-      DEBUGPRINTLN2("Stop newCount = count");
+      DEBUGPRINTLN2("[BELTWINDER] Stop newCount = count");
     }
     else if(dir ==-1){
       down();  //stop
-      DEBUGPRINTLN2("Stop newCount = count");
+      DEBUGPRINTLN2("[BELTWINDER] Stop newCount = count");
     }
   }
 }
 
-//Initialisierungsfahrt
+
+//Initialization run
 void calibrationRun(){
   calMode = true;
   calUp = true;
-  mqttSend(mqttInfoTopic, "Kalibrierungsfaht...", mqttRetain);
+  DEBUGPRINTLN2("[BELTWINDER] Start calibration: Roller shutter moves all the way up, then all the way down");
   up();
 }
 
 
 /*
-*Kalibrierung im Loop
-*1. calUp -fährt ganz nach oben und nullt Zähler
-*2. calDown -fährt ganz nach unten und speichert neues Maximum
-*Muss nach setDir ausgeführt werden und von calibrationRun gestartet werden.
+*Calibration in the loop
+*1. calUp - moves all the way up and zeros counter
+*2. calDown - moves all the way down and saves new maximum
+*Must be executed after setDir and started by calibrationRun.
 */
 void handleCalibration(){
+  //set_window_covering_mode(window_covering_endpoint_id, Mode::kCalibrationMode);
   if(calMode){
     if(dir==0 && calUp){
       delay(1000);
@@ -557,7 +695,7 @@ void handleCalibration(){
       down();
       delay(1000);
     }
-    else if(dir==0 &&calDown){
+    else if(dir==0 && calDown){
       calDown = false;
       calMode = false;
       posRunUp = false;
@@ -576,233 +714,55 @@ void handlePosCertainty(){
     posRunUp = false;
     posCertain = true;
     posChange = true;
-    DEBUGPRINTLN1("posCertain");
-    mqttSend(mqttInfoTopic, "Position eindeutig", mqttRetain);
+    DEBUGPRINTLN2("[BELTWINDER] posCertain");
   }
   if(posRunDown){
     count = maxCount;
     posRunDown = false;
     posCertain = true;
     posChange = true;
-    DEBUGPRINTLN1("posCertain");
-    mqttSend(mqttInfoTopic, "Position eindeutig", mqttRetain);
+    DEBUGPRINTLN2("[BELTWINDER] posCertain");
   } 
 }
 
 void setupPins(){
-  // -- Definiere Pins
-  pinMode(D5, INPUT);         // Impulszähler
-  pinMode(D3, INPUT_PULLUP);  // Motor fährt hoch
-  pinMode(D4, INPUT_PULLUP);  // Motor fährt runter
-  pinMode(D1, OUTPUT);        // Taste für runter
-  digitalWrite(D1, HIGH);     // Setze Taste auf HIGH
-  pinMode(D2, OUTPUT);        // Taste für hoch
-  digitalWrite(D2, HIGH);     // Setze Taste auf HIGH
-}
-/*
-*
-*Web-Server
-*
-*/
-
-// -- Handle Anfragen zum "/"-Pfad.
-void handleRoot(){
-  // -- Lass IotWebConf das Captive Portal testen und verwalten.
-  if (iotWebConf.handleCaptivePortal())
-  {
-    // -- Captive Portal Anfragen werden bedient.
-    return;
-  }
-  String s = "<!DOCTYPE html><html lang=\"en\"><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1, user-scalable=no\"/>";
-  s += "<title>MQTT Parameter</title></head><body>MQTT Parameter";
-  s += "<ul>";
-  s += "<li>MQTT Server: ";
-  s += mqttServerValue;
-  s += "<li>MQTT Port: ";
-  s += mqttPortValue;
-  s += "<li>MQTT Topic-Prefix: ";
-  s += mqttTopicValue;
-  s += "<li>MQTT Info Topic: ";
-  s += mqttInfoTopic;
-  s += "<li>MQTT Up Topic: ";
-  s += mqttUpTopic;
-  s += "<li>MQTT Down Topic: ";
-  s += mqttDownTopic;
-  s += "<li>MQTT Pause Topic: ";
-  s += mqttPauseTopic;
-  s += "<li>MQTT Position Topic: ";
-  s += mqttPositionTopic;
-  s += "<li>MQTT Calibration Topic: ";
-  s += mqttCalibrationTopic;
-  s += "<li>MQTT count Topic: ";
-  s += mqttStateTopic;
-  s += "<li>MQTT state Topic: ";
-  s += mqttCountTopic;
-  s += "<li>MQTT Online Status Topic: ";
-  s += mqttOnlineStatusTopic;
-  s += "</ul>";
-  s += "Gehe zur <a href='config'>Konfigurations-Seite</a> f&uuml;r &Auml;nderungen.";
-  s += "</body></html>\n";
-
-  server.send(200, "text/html", s);
+  // -- Define pins
+  pinMode(PULSECOUNTER, INPUT);       // Pulse counter
+  pinMode(MOTOR_UP, INPUT_PULLUP);    // Motor starts up
+  pinMode(MOTOR_DOWN, INPUT_PULLUP);  // Motor moves down
+  pinMode(BUTTON_DOWN, OUTPUT);       // Button for down
+  digitalWrite(BUTTON_DOWN, HIGH);    // Set button to HIGH
+  pinMode(BUTTON_UP, OUTPUT);         // Button for up
+  digitalWrite(BUTTON_UP, HIGH);      // Set button to HIGH
 }
 
+/*********************************************************************************
+ * * * MISCELLANEOUS
+ *********************************************************************************/
 
-void configSaved(){
-  DEBUGPRINTLN1("Konfiguration wurde aktuallisiert.");
-  needReset = true;
-}
 
-boolean formValidator(){
-  DEBUGPRINTLN1("Eingaben werden überprüft.");
-  boolean valid = true;
-  int s = server.arg(mqttServer.getId()).length();
-  if (s < 3)
-  {
-    mqttServer.errorMessage = "Gib bitte einen g&uuml;ltigen Server ein.";
-    valid = false;
-  }
-  /*int p = server.arg(mqttPort.getId()).length();
-  if (p < 3)
-  {
-    mqttPort.errorMessage = "Gib bitte einen g&uuml;ltigen Port ein.";
-    valid = false;
-  }*/
-  int t = server.arg(mqttTopic.getId()).length();
-  if (t < 3)
-  {
-    mqttTopic.errorMessage = "Gib bitte ein g&uuml;ltiges Topic ein.";
-    valid = false;
-  }
-  return valid;
-}
+void loadMaxCount()
+{
+    // Load lower position (maxCount) from the KeyValueStore
+    size_t bytesRead;
+    CHIP_ERROR err = chip::DeviceLayer::PersistedStorage::KeyValueStoreMgr().Get(kMaxCountKey, &maxCount, sizeof(maxCount), &bytesRead);
 
-void setupWebserver(){
-  iotWebConf.setConfigPin(CONFIG_PIN);
-  iotWebConf.addParameter(&separator2);
-  iotWebConf.addParameter(&mqttServer);
-  iotWebConf.addParameter(&mqttPort);
-  iotWebConf.addParameter(&mqttUser);
-  iotWebConf.addParameter(&mqttPassword);
-  iotWebConf.addParameter(&mqttTopic);
-  iotWebConf.setConfigSavedCallback(&configSaved);
-  iotWebConf.setFormValidator(&formValidator);
-  iotWebConf.setupUpdateServer(&httpUpdater);
-  iotWebConf.getApTimeoutParameter()->visible = true;
+    if (err == CHIP_ERROR_KEY_NOT_FOUND)
+    {
+        // The value was not found, set it to the default value (e.g. 0)
+        maxCount = 0;
 
-  // -- IotWebConf-Konfiguration initialisieren.
-  iotWebConf.init();
-
-  // -- URL-Handler auf dem Webserver aktivieren
-  server.on("/", handleRoot);
-  server.on("/config", []{ iotWebConf.handleConfig(); });
-  server.onNotFound([](){ iotWebConf.handleNotFound(); });
-
-  WiFi.hostname(iotWebConf.getThingName());
-}
-/*
-*
-*Sonstiges
-*
-*/
-
-char * addIntToChar(char* text, int i){
-  char * temp = new char [200];
-  strcpy (temp,text);
-  itoa(i, temp+strlen(temp), 10);
-  return temp;
-}
-//Lade Werte aus den EEPROM
-void loadMaxCount(){
-    //Lade untere Position (maxCount) aus dem EEPROM
-  maxCount = EEPROM.read (10);
-  //Sanity check
-  if(maxCount>0){
-    DEBUGPRINTLN1("Geladene Konfig 'maxcount'= "+String(maxCount));
-    //Lade checks aus dem EEPROM
-    int check1 = EEPROM.read(11);
-    int check2 = EEPROM.read(12);
-    int check3 = EEPROM.read(13);
-    if(check1 == 19 && check2 == 92 && check3 == 42){
-      maxCountInit=true;
-      DEBUGPRINTLN1("Geladene Konfig 'maxcount initFlag'= "+String(maxCountInit));
-      DEBUGPRINTLN3("Geladene Konfig 'maxcount check1'= "+String(check1));
-      DEBUGPRINTLN3("Geladene Konfig 'maxcount check2'= "+String(check2));
-      DEBUGPRINTLN3("Geladene Konfig 'maxcount check3'= "+String(check3));
+        // Save the default value in the KeyValueStore
+        err = chip::DeviceLayer::PersistedStorage::KeyValueStoreMgr().Put(kMaxCountKey, &maxCount, sizeof(maxCount));
+        if (err != CHIP_NO_ERROR)
+        {
+            DEBUGPRINTLN2("Error when saving the value: " + String(err.Format()));
+        }
     }
-  }
-}
-
-
-/*
-*
-*Setup & Loop
-*
-*/
-void setup() {
-  Serial.begin(115200);
-  // while the serial stream is not open, do nothing:
-  //Nur zum debuggen benötigt
-  if(DEBUGLEVEL >0){
-    while (!Serial) ;
-    delay(1000);
-  }
-  DEBUGPRINTLN1("Start");
-
-  setupWebserver();
-
-  setupMqtt();
-
-  setupPins();
-
-  //lese gespeicherten maxCount Wert aus dem Speicher
-  loadMaxCount();
-
-  // -- So, alles erledigt... kann los gehen
-  DEBUGPRINTLN1("Initialisierung abgeschlossen.");
-}
-
-void loop() {
-  // -- doLoop should be called as frequently as possible.
-  iotWebConf.doLoop();
-
-  //wenn gerade eine Konfigurations-Änderung stattgefunden hat -> ESP neu starten
-  if (needReset) {
-    DEBUGPRINTLN1("Reboot nach einer Sekunde.");
-    iotWebConf.delay(1000);
-    ESP.restart();
-  }
-  
-  // check if MQTT is connected, if not: connect
-  if (WiFi.status() == WL_CONNECTED && !client.connected()) {
-    if(reconnect()){
-      //Set online satus
-      mqttSend(mqttOnlineStatusTopic, "true", mqttRetain);
+    else if (err != CHIP_NO_ERROR)
+    {
+        DEBUGPRINTLN2("Error loading the value: " + String(err.Format()));
     }
-    else{
-      needReset = true;
-      //evtl. continue? idk
-      return;
-    }
-  }
-  //MQTT loop -Befehle werden hier empfangen
-  client.loop();
 
-  //Zähle aktuelle Position
-  countPosition();
-  //Bestimme Aktuelle Richtung
-  setCurrentDirection();
-
-  //Stelle fest ob aktuelle Position eindeutig ist
-  handlePosCertainty();
-
-  //Aktuelle Position per Mqtt senden
-  sendCurrentPosition();
-
-  //Fahre neue Position an
-  moveToNewPos();
-
-  //Kalibrierungsfahrt ausführen
-  handleCalibration();
-
+    DEBUGPRINTLN2("Loaded config 'maxcount' = " + String(maxCount));
 }

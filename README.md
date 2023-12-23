@@ -1,65 +1,34 @@
 # BeltWinder
-GW60 Superrollo Gurtwickler ESP8266 Programm mit WiFi/MQTT
+GW60 Superrollo belt winder ESP32 program with Matter support
 Version: 0.1
 
-Inspiriert und basierend auf dem Programm von ManuA:
+Inspired and based on the program from ManuA and mar565:
 https://gitlab.com/ManuA/GW60-Superrollo
+https://github.com/mar565/BeltWinder
 
-Ausgelegt für die Platine von Papa Romeo (https://forum.fhem.de/index.php/topic,60575.msg723047.html#msg723047)
+Designed for the board from Papa Romeo (https://forum.fhem.de/index.php/topic,60575.msg723047.html#msg723047)
 
-Wann, und ob, ich etwas von der ToDo Liste abarbeite entscheidet Lust und Laune.
-Hilfe ist natürlich gern gesehen. Da ich kein Informatiker bin, sondern das ganze nur als Hobby betreibe, lerne ich auf diese Weise gerne dazu.
+When, and if, I work off something from the ToDo list decides desire and mood.
+Help is of course welcome. Since I am not a computer scientist, but only do this as a hobby, I like to learn in this way.
 
-
+Librarys:
+Please add the following library:
+https://github.com/jakubdybczak/esp32-arduino-matter.git
 
 # Features:
 
-**Verhalten:**
-* Es reicht die .bin Datei auf den ESP zu flashen.
-* Nach erstmaliger Gerätekonfiguration und WLAN Verbindung:
-    * Minimal notwendige Topics werden erstellt.
-    * Kalibrierungsfahrt muss gestartet werden: einmalig notwendig
-    * Position Topic wird erstellt und aktiviert
-* Nach reboot:
-    * letzte bekannte Position wird übermittelt. Postion ist unbestätigt
-    * Falls zuerst ein Prozentwert ungleich 0/100 angefahren werden soll, findet eine Positionierungsfahrt statt [kürzeste Strecke zwischen vermuteter Position und gewünschter Position, mit Halt an einem Anschlag]. Postion ist bis zum nächsten reboot bestätigt
+**Integration via QR code or via code input:**.
+    * Calibration drive must be started: once necessary.
+    * Position Topic is created and activated
+* After reboot:
+    * last known position is transmitted. Position is unconfirmed
+    * If a percentage value unequal 0/100 is to be approached first, a positioning run takes place [shortest distance between presumed position and desired position, with stop at a stop]. Position is confirmed until next reboot
 
-**MQTT Anbindung:**
-* /alive: Status des Gerätes durch lastWill. [true/false -read only]
-* /calibration: Führt eine Kalibrierungsfahrt durch und speichert Wert in EEPROM [true/false(button)]
-* /state: Richtung [Inaktiv/Up/Down -read only ]
-* /info: wichtige Meldungen werden hier augegeben [read only]
-* /open: Fahre nach oben [true/false(button)]
-* /close: Fahre nach unten [true/false(button)]
-* /pause: Pausiere normale Fahrt [true/false(button)]
-* /position: aktuelle/gewünschte Position in %. Aktiv nach Kalibrierung [0-100]
-* /count: letzter bekannter Impulszählerwert. Wird beim Start abgerufen und als Ausgangswert genutzt (EEPROM Schonung)[read only]
-
-**IotWebserver:**
-* Start, ohne Konfiguration: Baut Access Point [name:"GW60-ESP", pw:"GW60-ESP"] auf. Gerätekonfiguration [192.168.4.1].
-* Start, mit Konfiguration, D0 high, mit Wartezeit: Access Point für konfigurierte Zeit, dann Verbindung zu WLAN.
-* Start, mit Konfiguration, D0 high, Wartezeit=0. Mqtt Verbindung in ~10s. Gerätekonfiguration [ip:admin:gesetztesPW]
-* Start, mit Konfiguration, D0 low: Acces Point mit Standartpasswort bis Verbindung.
 
 # To-Do's
-**Todo für V1.0:**
-* reedme verschönern...
-* Zusatzinfo für Betrieb mit geschalteter Stromversorgung
-* MQTT Port im IotWebServer konfigurierbar
-* Code cleanup - Aufteilung in main.cpp, webServer.cpp, mqttStuff.cpp, programMagic.cpp, otherMagic.cpp
-* Code kommentieren
-* Englisch Übersetzung: Kommentare + readme
-* Code anpassen für ESP32 (hauptsächlich iotWebServer)
+* beautify readme...
+* The connection between the matter code and the rest of the code still needs to be completed.
+* A custom device for calibrating the belt winder still needs to be created and inserted. (possibly a button could work)
 
-**Ideen nach V1.0:**
-* Programm universeller gestalten. Unabhängig von der Platine.
-* Unterstützung anderer Sensoren anstelle des Impulszählers. Bsp.: Entfernungsmesser
-* Verschiene Modi: Gurtwickler/Rollo/Jalousie(Schrägstellung)
-
-**Persönliche Ziele nach V1.0:**
-* Nutzung des ESP32 für BLE(RSSI) Entfernungsmessung. Bsp: Handy, Smartwatch, Beacon
-* Da die Gurtwickler günstig verteilt sind: Indoor BLE-Ortung durch Vergleich der einzelnen RSSI Werte. Zumindest Raumgenau...
-
-# Bugs & Bunnys
-* Nach dem Konfigurieren werden die MQTT Topics nicht erstellt. 1-2 reboots beheben das Problem. Kann auch an meinem Mossquitto oder ioBroker liegen
-* Nach der Kalibrierungsfahrt wird das Positionstopic nicht sofort erstellt. Lösung -> Kurz fahren.
+ATTENTION:
+This is an untested version, the communication to the Matter SDK is not yet defined.
