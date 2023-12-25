@@ -1,6 +1,6 @@
 # BeltWinder
 GW60 Superrollo belt winder ESP32 program with Matter support
-Version: 1.0
+Version: 1.1
 
 Inspired and based on the program from ManuA and mar565:
 https://gitlab.com/ManuA/GW60-Superrollo
@@ -23,6 +23,7 @@ https://github.com/jakubdybczak/esp32-arduino-matter.git
 * After reboot:
     * last known position is transmitted. Position is unconfirmed
     * If a percentage value unequal 0/100 is to be approached first, a positioning run takes place [shortest distance between presumed position and desired position, with stop at a stop]. Position is confirmed until next reboot
+    * The last known position will be stored in nvs and recovered at reboot so the system has certaincy about position even after reboot. If not, a calibrationrun can be triggerd via the app switch
 
 
 # To-Do's
