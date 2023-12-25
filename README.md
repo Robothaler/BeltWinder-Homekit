@@ -1,6 +1,6 @@
 # BeltWinder
 GW60 Superrollo belt winder ESP32 program with Matter support
-Version: 0.1
+Version: 1.0
 
 Inspired and based on the program from ManuA and mar565:
 https://gitlab.com/ManuA/GW60-Superrollo
@@ -17,18 +17,18 @@ https://github.com/jakubdybczak/esp32-arduino-matter.git
 
 # Features:
 
-**Integration via QR code or via code input:**.
-    * Calibration drive must be started: once necessary.
-    * Position Topic is created and activated
+**Integration via QR code or via code input:**.   
+    * QR-Code: https://project-chip.github.io/connectedhomeip/qrcode.html?data=MT%3AY.K9042C00KA0648G00  
+    * The calibration run must be carried out in the app after the first installation, after the end stops of the GW60 have been set. To do this, the light switch in the app (I have named this "Calibration") must be pressed.
 * After reboot:
     * last known position is transmitted. Position is unconfirmed
     * If a percentage value unequal 0/100 is to be approached first, a positioning run takes place [shortest distance between presumed position and desired position, with stop at a stop]. Position is confirmed until next reboot
 
 
 # To-Do's
-* beautify readme...
-* The connection between the matter code and the rest of the code still needs to be completed.
-* A custom device for calibrating the belt winder still needs to be created and inserted. (possibly a button could work)
+* I still don't like the solution with the light switch as the activation switch for the calibration run. I want to try further improvements here. Mode Select or Mode Base may be able to help here.
+* Integration of Matter's OTA functionality to easily update the installed belt winders.
 
 ATTENTION:
-This is an untested version, the communication to the Matter SDK is not yet defined.
+I have put this version into operation at my place, it works so far. Let's see what bugs come up, if necessary I'll add bug fixes and feature improvements.
+Use the code at your own risk.
