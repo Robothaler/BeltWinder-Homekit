@@ -1,3 +1,9 @@
+/*
+  SetupQRCode: [MT:Y.K9042C00KA0648G00]
+  https://project-chip.github.io/connectedhomeip/qrcode.html?data=MT%3AY.K9042C00KA0648G00
+  Manual pairing code: 3497-011-2332
+*/
+
 #include <Arduino.h>
 #include "Matter.h"
 #include <app/server/OnboardingCodesUtil.h>
@@ -6,7 +12,7 @@
 #include "Config.h"
 
 //Define debug level
-#define DEBUGLEVEL 0
+#define DEBUGLEVEL 3
 #include <DebugUtils.h>
 
 #include <esp_log.h>
@@ -14,6 +20,7 @@
 
 // Custom keys for your data
 const char * kMaxCountKey = "MaxCount";
+const char * kCountKey = "Count";
 
 using namespace chip;
 using namespace chip::app::Clusters;
@@ -34,6 +41,7 @@ const uint32_t WINDOW_COVERING_ATTRIBUTE_ID_TYPE = WindowCovering::Attributes::T
 const uint32_t WINDOW_COVERING_ATTRIBUTE_ID_CONFIG = WindowCovering::Attributes::ConfigStatus::Id;
 const uint32_t WINDOW_COVERING_ATTRIBUTE_ID_MODE = WindowCovering::Attributes::Mode::Id;
 const uint32_t WINDOW_COVERING_ATTRIBUTE_ID_SAFETY = WindowCovering::Attributes::SafetyStatus::Id;
+
 // Cluster for CalibrationSwitch
 const uint32_t CLUSTER_ID = OnOff::Id;
 const uint32_t ATTRIBUTE_ID = OnOff::Attributes::OnOff::Id;
@@ -45,24 +53,27 @@ attribute_t *attribute_ref_1;
 
 static const char TAG[] = "WindowCovering-App";
 
-
 //Function prototypes
 void setupPins();
+void loadCount();
 void loadMaxCount();
 void up();
 void down();
+void saveCount(int count);
 void setMaxCount();
 void newPosition(int newPercentage);
 void countPosition();
 void calibrationRun();
 void setCurrentDirection();
-void sendCurrentPosition();
+void sendCurrentPosition(int count, int maxCount);
 void handlePosCertainty();
 void moveToNewPos();
 void handleCalibration();
+void bufferNewPosition();
 void set_window_covering_position(esp_matter_attr_val_t *current);
-void set_onoff_attribute_value(esp_matter_attr_val_t *onoff_value, uint16_t plugin_unit_endpoint_id_1);
+void set_onoff_attribute_value(esp_matter_attr_val_t *onoff_value, uint16_t switch_endpoint_id_1);
 void set_operational_state(chip::EndpointId endpoint, OperationalState newState);
+esp_matter_attr_val_t get_onoff_attribute_value();
 
 
 /*********************************************************************************
@@ -88,10 +99,12 @@ static esp_err_t on_attribute_update(attribute::callback_type_t type, uint16_t e
       // Conversion from the transfer value 10000 to 100% percent
       int new_position_in_counts = new_target_position / 100;
 
-      // Transfer of the new position value to the existing function
-      newPosition(new_position_in_counts);
-
-      DEBUGPRINTLN2("[BELTWINDER] newPosition function called with new target position: " + String(new_position_in_counts));
+      // Starting buffering of the values to eliminate subvalues during moving the app slider
+      newPercentageReceived = true;
+      newPercentage = new_position_in_counts;
+      DEBUGPRINTLN2("[BELTWINDER] bufferNewPosition function called with new target position: " + String(newPercentage));
+      DEBUGPRINTLN2("[BELTWINDER] newPercentageReceived ist set to: " + String(newPercentageReceived));
+      
     } else if (cluster_id == CLUSTER_ID && attribute_id == ATTRIBUTE_ID) {
       // We got a Calibration Switch on/off attribute update!
       calButton = val->val.b;
@@ -112,6 +125,18 @@ static esp_err_t on_attribute_update(attribute::callback_type_t type, uint16_t e
   return ESP_OK;
 }
 
+// Sets the value of the WindowCovering attribute for the current position (both target and current attributes must be sent!)
+void set_window_covering_position(esp_matter_attr_val_t *current)
+{   
+    if (lastCount =! count){
+    saveCount(count);
+    }
+    lastCount = count;
+    attribute::update(window_covering_endpoint_id, WINDOW_COVERING_CLUSTER_ID, WINDOW_COVERING_ATTRIBUTE_ID_CURRENT, current);
+    attribute::update(window_covering_endpoint_id, WINDOW_COVERING_CLUSTER_ID, WINDOW_COVERING_ATTRIBUTE_ID_TARGET, current);
+}
+
+
 // Reads calibration switch on/off attribute value
 esp_matter_attr_val_t get_onoff_attribute_value() {
   esp_matter_attr_val_t onoff_value = esp_matter_invalid(NULL);
@@ -119,17 +144,12 @@ esp_matter_attr_val_t get_onoff_attribute_value() {
   return onoff_value;
 }
 
-// Sets the value of the WindowCovering attribute for the current position (both target and current attributes must be sent!)
-void set_window_covering_position(esp_matter_attr_val_t *current)
-{    
-    attribute::update(window_covering_endpoint_id, WINDOW_COVERING_CLUSTER_ID, WINDOW_COVERING_ATTRIBUTE_ID_CURRENT, current);
-    attribute::update(window_covering_endpoint_id, WINDOW_COVERING_CLUSTER_ID, WINDOW_COVERING_ATTRIBUTE_ID_TARGET, current);
-}
 
 // Sends the on / off command to the app
-void set_onoff_attribute_value(esp_matter_attr_val_t* onoff_value) {
+void set_onoff_attribute_value(esp_matter_attr_val_t* onoff_value, uint16_t switch_endpoint_id_1) {
   attribute::update(switch_endpoint_id_1, CLUSTER_ID, ATTRIBUTE_ID, onoff_value);
 }
+
 
 void set_operational_state(chip::EndpointId endpoint, OperationalState newState)
 {
@@ -148,7 +168,6 @@ void set_operational_state(chip::EndpointId endpoint, OperationalState newState)
         // Handle error if needed
     }
 }
-
 
 
 /*********************************************************************************
@@ -271,22 +290,18 @@ void set_window_covering_safetystatus(chip::EndpointId endpoint, SafetyStatus ne
     }
 }
 
-
 /*********************************************************************************
  * * * SETUP
  *********************************************************************************/
 void setup() {
   Serial.begin(115200);
-  esp_log_level_set("*", ESP_LOG_NONE);
+  esp_log_level_set("*", ESP_LOG_DEBUG);
 
   DEBUGPRINTLN1("[BELTWINDER] Start");
 
   setupPins();
 
-  //read stored maxCount value from the memory
-  loadMaxCount();
-
-  // Create Matter node
+  // Create onoff Matter node
   node::config_t node_config;
   on_off_light::config_t light_config;
   node_t *node = node::create(&node_config, on_attribute_update, on_identification);
@@ -307,7 +322,7 @@ void setup() {
   cluster_t *cluster = cluster::get(endpoint, WindowCovering::Id);
   cluster::window_covering::feature::lift::config_t lift;
   cluster::window_covering::feature::position_aware_lift::config_t position_aware_lift;
-  nullable<uint8_t> percentage = nullable<uint8_t>(0);
+  //nullable<uint8_t> percentage = nullable<uint8_t>(0);
     nullable<uint16_t> percentage_100ths = nullable<uint16_t>(0);
     //position_aware_lift.current_position_lift_percentage = percentage;
     position_aware_lift.target_position_lift_percent_100ths = percentage_100ths;
@@ -316,7 +331,7 @@ void setup() {
   cluster::window_covering::feature::position_aware_lift::add(cluster, &position_aware_lift);
 
   // Setup DAC (this is good place to also set custom commission data, passcodes etc.)
-  //esp_matter::set_custom_dac_provider(chip::Credentials::Examples::GetExampleDACProvider());
+  esp_matter::set_custom_dac_provider(chip::Credentials::Examples::GetExampleDACProvider());
    
   // Start Matter
   esp_matter::start(on_device_event);
@@ -343,6 +358,19 @@ void setup() {
   // Print onboarding codes
   PrintOnboardingCodes(chip::RendezvousInformationFlags(chip::RendezvousInformationFlag::kBLE));
 
+  //read stored count value from the memory (last known position)
+  loadCount();
+
+  //read stored maxCount value from the memory
+  loadMaxCount();
+
+  // Reload last known position, in case of reboot of a calibrated device
+  if (maxCount =! 0){
+    maxCountInit = true;
+    posCertain = true;
+    posChange = true;
+  } 
+ 
   // -- So, alles erledigt... kann los gehen
   DEBUGPRINTLN1("[BELTWINDER] Initialization completed.");
 }
@@ -352,6 +380,9 @@ void setup() {
  * * * LOOP
  *********************************************************************************/
 void loop() {
+
+  //buffer new Position if a new target position is received
+  bufferNewPosition();
 
   //Count current position
   countPosition();
@@ -363,7 +394,7 @@ void loop() {
   handlePosCertainty();
 
   //Send current position to App
-  sendCurrentPosition();
+  sendCurrentPosition(count, maxCount);
 
   //Move to new position
   moveToNewPos();
@@ -446,12 +477,7 @@ void setMaxCount()
             maxCountInit = true;
             DEBUGPRINTLN2("New maximum count set: " + String(maxCount) + "]");
             posChange = true;
-            sendCurrentPosition();
-
-            // Calibration completed, send "false" to the app
-            esp_matter_attr_val_t onoff_value = get_onoff_attribute_value();
-            onoff_value.val.b = !onoff_value.val.b;
-            set_onoff_attribute_value(&onoff_value);
+            sendCurrentPosition(count, maxCount);
         }
         else
         {
@@ -465,7 +491,23 @@ void setMaxCount()
 }
 
 
+// Saving the actual position
+void saveCount(int count)
+{
+  // Save Count value
+  CHIP_ERROR err = chip::DeviceLayer::PersistedStorage::KeyValueStoreMgr().Put(kCountKey, &count, sizeof(count));
+  if (err == CHIP_NO_ERROR)
+  {
+    DEBUGPRINTLN2("Save count to nvs: " + String(count) + "]");
+  }
+}
+
+
 void countPosition(){
+  if (maxCountReloaded) {
+    maxCount = newMaxCount;
+    maxCountReloaded = false;
+    }
   if (digitalRead(PULSECOUNTER) == LOW && digitalRead(MOTOR_UP) == HIGH && dir == 1 && !counted) {
     count++;
     DEBUGPRINTLN2("[BELTWINDER] new count (MOTOR_DOWN): " + String(count));
@@ -488,7 +530,7 @@ void countPosition(){
 }
 
 
-void sendCurrentPosition()
+void sendCurrentPosition(int count, int maxCount)
 {
     //Send value only if changed and standstill
     if (!posChange || dir != 0)
@@ -502,7 +544,8 @@ void sendCurrentPosition()
         // -- Calculate percentage values
         int percentage = count / (maxCount * 0.01);
         lastSendPercentage = percentage;
-
+        DEBUGPRINTLN2("[BELTWINDER] sendCurrentPosition: Count Value: " + String(count));
+        DEBUGPRINTLN2("[BELTWINDER] sendCurrentPosition: maxCount Value: " + String(maxCount));
         DEBUGPRINTLN2("[BELTWINDER] sendCurrentPosition: Send current position to the app: " + String(percentage) + "%");
 
         // Update the attribute with the current percentage value
@@ -540,35 +583,50 @@ void setCurrentDirection() {
 }
 
 
-void newPosition(int newPercentage) {
+void bufferNewPosition() {
     unsigned long currentTime = millis();
 
-    bufferedPercentage = newPercentage;
-    DEBUGPRINTLN2("[BELTWINDER] newPosition: New percentage received - " + String(newPercentage) + "%");
-
-    if (lastUpdateTime == 0) {
-        lastUpdateTime = currentTime;
-        DEBUGPRINTLN2("[BELTWINDER] lastUpdateTime: New timestamp - " + String(lastUpdateTime) + "ms");
-    }
-
-    // Buffer the value when enough time has passed
-    if (currentTime - lastUpdateTime < filterDuration) {
-      DEBUGPRINTLN2("[BELTWINDER] currentTime: New timestamp - " + String(currentTime) + "ms");
+    // The very first new target value received
+    if (newPercentageReceived && !bufferedValueSaved) {
         bufferedPercentage = newPercentage;
-         DEBUGPRINTLN2("[BELTWINDER] Buffering the value during the buffer time - Value: " + String(bufferedPercentage) + ", Time: " + String(currentTime - lastUpdateTime) + " ms");
-         return;
-    } else {
-        // Time has expired, use the last buffered value
-        DEBUGPRINTLN2("[BELTWINDER] Time limit for buffering exceeded. Use last buffered value.");
+        DEBUGPRINTLN2("[BELTWINDER] bufferNewPosition: New percentage received - " + String(newPercentage) + "%");
+        DEBUGPRINTLN2("[BELTWINDER] bufferNewPosition: First value buffered - " + String(bufferedPercentage) + "%");
+
+        bufferedValueSaved = true;
+        
+        lastUpdateTime = currentTime;
+        DEBUGPRINTLN2("[BELTWINDER] lastUpdateTime was 0 will be changed to: New timestamp - " + String(lastUpdateTime) + "ms");
+        return;
+        }
+        
+    // A new target value received within filter duration
+    if (newPercentageReceived && bufferedValueSaved && currentTime - lastUpdateTime <= filterDuration) {
+
+      if (newPercentage == bufferedPercentage) {
+        DEBUGPRINTLN2("[BELTWINDER] bufferNewPosition: New percentage is equal to buffered Percentage - " + String(newPercentage) + "%");
+      } else {
+        bufferedPercentage = newPercentage;
+        bufferedValueSaved = true;
+        return; 
+        }
+    } else if (newPercentageReceived && bufferedValueSaved && currentTime - lastUpdateTime > filterDuration){
+      // Time has expired, use the last buffered value
+        DEBUGPRINTLN2("[BELTWINDER] bufferNewPosition: Time limit for buffering exceeded. Use last buffered value for new position.");
         filteredPercentage = bufferedPercentage;
         
-        DEBUGPRINTLN2("[BELTWINDER] newPosition: Filtered percentage - " + String(filteredPercentage));
+        DEBUGPRINTLN2("[BELTWINDER] bufferNewPosition: Filtered percentage - " + String(filteredPercentage));
 
         lastUpdateTime = 0; // Set lastUpdateTime to 0 for the next update
+        newPercentageReceived = false;
+        bufferedValueSaved = false;
+        newPosition(filteredPercentage);
     }
+}
 
-    // Filter for own publishes
-    if (lastSendPercentageInit && lastSendPercentage == filteredPercentage) {
+
+void newPosition(int newPercentage) {
+        // Filter for own publishes
+    if (lastSendPercentageInit && lastSendPercentage == newPercentage) {
         return;
     }
 
@@ -578,13 +636,13 @@ void newPosition(int newPercentage) {
     }
 
     // Sanity check
-    if (filteredPercentage < 0 || filteredPercentage > 100) {
+    if (newPercentage < 0 || newPercentage > 100) {
         DEBUGPRINTLN2("[BELTWINDER] newPosition: Invalid percentage. Action is skipped.");
         return;
     }
 
     // Set new target value
-    newCount = int((float(filteredPercentage) / 100 * maxCount) + 0.5);
+    newCount = int((float(newPercentage) / 100 * maxCount) + 0.5);
     newCountInit = true;
 
     DEBUGPRINTLN2("[BELTWINDER] newPosition: New Count value - " + String(newCount));
@@ -615,7 +673,6 @@ void newPosition(int newPercentage) {
         DEBUGPRINTLN2("[BELTWINDER] newPosition: Remote control activated.");
     }
 }
-
 
 
 //Moves to new position value
@@ -701,6 +758,11 @@ void handleCalibration(){
       posRunUp = false;
       posRunDown = false;
       setMaxCount();
+
+    // Calibration startet, reset the app button
+    esp_matter_attr_val_t onoff_value = get_onoff_attribute_value();
+    onoff_value.val.b = !onoff_value.val.b;
+    set_onoff_attribute_value(&onoff_value, switch_endpoint_id_1);
     }
   }
 }
@@ -764,5 +826,33 @@ void loadMaxCount()
         DEBUGPRINTLN2("Error loading the value: " + String(err.Format()));
     }
 
-    DEBUGPRINTLN2("Loaded config 'maxcount' = " + String(maxCount));
+    DEBUGPRINTLN2("Loaded config 'maxCount' = " + String(maxCount));
+    newMaxCount = maxCount;
+    maxCountReloaded = true;
+}
+
+void loadCount()
+{
+    // Load stored position (count) from the KeyValueStore
+    size_t bytesRead;
+    CHIP_ERROR err = chip::DeviceLayer::PersistedStorage::KeyValueStoreMgr().Get(kCountKey, &count, sizeof(count), &bytesRead);
+
+    if (err == CHIP_ERROR_KEY_NOT_FOUND)
+    {
+        // The value was not found, set it to the default value (e.g. 0)
+        count = 0;
+
+        // Save the default value in the KeyValueStore
+        err = chip::DeviceLayer::PersistedStorage::KeyValueStoreMgr().Put(kCountKey, &count, sizeof(count));
+        if (err != CHIP_NO_ERROR)
+        {
+            DEBUGPRINTLN2("Error when saving the value: " + String(err.Format()));
+        }
+    }
+    else if (err != CHIP_NO_ERROR)
+    {
+        DEBUGPRINTLN2("Error loading the value: " + String(err.Format()));
+    }
+
+    DEBUGPRINTLN2("Loaded config 'count' = " + String(count));
 }

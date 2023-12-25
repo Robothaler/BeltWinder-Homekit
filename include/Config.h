@@ -4,12 +4,11 @@
 #pragma once
 
 // -- Variables
-int dir = 0, count = 0, maxCount, newCount = 0, lastSendPercentage = 0, lastTargetPosition = 0, bufferedPercentage = 0, filteredPercentage = 0;
-const int filterDuration = 800;
+int dir = 0, count = 0, lastCount = 0, maxCount, newCount = 0, newMaxCount = 0, lastSendPercentage = 0, lastTargetPosition = 0, bufferedPercentage = 0, filteredPercentage = 0, newPercentage = 0;
+const int filterDuration = 1500;
 float percentage = 0;
-bool calButton = false, remote = false, posCertain = false, calMode = false, calUp = false, calDown = false, lastSendPercentageInit = false, newCountInit = false, maxCountInit = false, counted = false, posChange = false,posRunUp = false, posRunDown = false;
+bool maxCountReloaded = false, newPercentageReceived = false, bufferedValueSaved = false, calButton = false, remote = false, posCertain = false, calMode = false, calUp = false, calDown = false, lastSendPercentageInit = false, newCountInit = false, maxCountInit = false, counted = false, posChange = false,posRunUp = false, posRunDown = false;
 unsigned long lastUpdateTime = 0;
-
 
 // Pin definitions
 #define PULSECOUNTER    18    // Pulse counter
