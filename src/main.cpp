@@ -5,31 +5,19 @@
 */
 
 #include <Arduino.h>
-#include "Matter.h"
-#include <app/server/OnboardingCodesUtil.h>
-#include <app/clusters/window-covering-server/window-covering-server.h>
-#include <credentials/examples/DeviceAttestationCredsExample.h>
 #include "Config.h"
+#include "BeltWinder.h"
 
-//Define debug level
-#define DEBUGLEVEL 3
-#include <DebugUtils.h>
-
-#include <esp_log.h>
-#include <esp_err.h>
+// -- Variables
+int dir = 0, count = 0, lastCount = 0, maxCount, newCount = 0, newMaxCount = 0, lastSendPercentage = 0, lastTargetPosition = 0, bufferedPercentage = 0, filteredPercentage = 0, newPercentage = 0;
+const int filterDuration = 1500;
+float percentage = 0;
+bool maxCountReloaded = false, newPercentageReceived = false, bufferedValueSaved = false, calButton = false, remote = false, posCertain = false, calMode = false, calUp = false, calDown = false, lastSendPercentageInit = false, newCountInit = false, maxCountInit = false, counted = false, posChange = false,posRunUp = false, posRunDown = false;
+unsigned long lastUpdateTime = 0;
 
 // Custom keys for your data
 const char * kMaxCountKey = "MaxCount";
 const char * kCountKey = "Count";
-
-using namespace chip;
-using namespace chip::app::Clusters;
-using namespace esp_matter;
-using namespace esp_matter::endpoint;
-using namespace esp_matter::attribute;
-using namespace esp_matter::cluster;
-
-using namespace chip::app::Clusters::WindowCovering;
 
 // Cluster and attribute ID used by Matter WindowCovering Device
 const uint32_t WINDOW_COVERING_CLUSTER_ID = WindowCovering::Id;
@@ -50,6 +38,8 @@ uint16_t window_covering_endpoint_id = 0;
 uint16_t switch_endpoint_id_1 = 0;
 attribute_t *attribute_ref_target;
 attribute_t *attribute_ref_1;
+
+CoveringDelegate covering_delegate;
 
 static const char TAG[] = "WindowCovering-App";
 
@@ -124,6 +114,7 @@ static esp_err_t on_attribute_update(attribute::callback_type_t type, uint16_t e
   }
   return ESP_OK;
 }
+
 
 // Sets the value of the WindowCovering attribute for the current position (both target and current attributes must be sent!)
 void set_window_covering_position(esp_matter_attr_val_t *current)
@@ -295,7 +286,7 @@ void set_window_covering_safetystatus(chip::EndpointId endpoint, SafetyStatus ne
  *********************************************************************************/
 void setup() {
   Serial.begin(115200);
-  esp_log_level_set("*", ESP_LOG_DEBUG);
+  esp_log_level_set("*", ESP_LOG_LEVEL);
 
   DEBUGPRINTLN1("[BELTWINDER] Start");
 
@@ -303,13 +294,14 @@ void setup() {
 
   // Create onoff Matter node
   node::config_t node_config;
-  on_off_light::config_t light_config;
+  on_off_plugin_unit::config_t switch_config;
   node_t *node = node::create(&node_config, on_attribute_update, on_identification);
-
+  
   // Create Window Covering device
   window_covering_device::config_t window_config;
+  window_covering_device::config_t window_covering_device_config(static_cast<uint8_t>(chip::app::Clusters::WindowCovering::EndProductType::kRollerShutter));
   endpoint_t *endpoint = window_covering_device::create(node, &window_config, ENDPOINT_FLAG_NONE, NULL);
-  endpoint_t *plugin_unit_endpoint_id_1 = on_off_light::create(node, &light_config, ENDPOINT_FLAG_NONE, NULL);
+  endpoint_t *switch_endpoint_id_1 = on_off_plugin_unit::create(node, &switch_config, ENDPOINT_FLAG_NONE, NULL);
 
   // Get attribute reference
   attribute_ref_target = attribute::get(cluster::get(endpoint, WINDOW_COVERING_CLUSTER_ID), WINDOW_COVERING_ATTRIBUTE_ID_TARGET);
@@ -320,6 +312,7 @@ void setup() {
 
   // Configure Window Covering cluster features
   cluster_t *cluster = cluster::get(endpoint, WindowCovering::Id);
+  command_t *command = on_off::command::create_off(cluster);
   cluster::window_covering::feature::lift::config_t lift;
   cluster::window_covering::feature::position_aware_lift::config_t position_aware_lift;
   //nullable<uint8_t> percentage = nullable<uint8_t>(0);
@@ -329,6 +322,12 @@ void setup() {
     position_aware_lift.current_position_lift_percent_100ths = percentage_100ths;
   cluster::window_covering::feature::lift::add(cluster, &lift);
   cluster::window_covering::feature::position_aware_lift::add(cluster, &position_aware_lift);
+
+  // Implementing StopMotion Command
+  esp_matter::endpoint::enable(endpoint);
+  covering_delegate = CoveringDelegate();
+  covering_delegate.SetEndpoint(window_covering_endpoint_id);
+  chip::app::Clusters::WindowCovering::SetDefaultDelegate((chip::EndpointId) window_covering_endpoint_id, &covering_delegate);
 
   // Setup DAC (this is good place to also set custom commission data, passcodes etc.)
   esp_matter::set_custom_dac_provider(chip::Credentials::Examples::GetExampleDACProvider());
@@ -461,6 +460,28 @@ void down() {
 
   DEBUGPRINTLN2("[BELTWINDER] Exiting down() function.");
 }
+
+
+// Function for StopMotion
+void stopMotion() {
+  DEBUGPRINTLN2("[BELTWINDER] Entering stopMotion() function.");
+
+  if (dir != 0) {
+    DEBUGPRINTLN2("[BELTWINDER] Direction is not stall");
+
+    // Simulated button press "down"
+    DEBUGPRINTLN2("[BELTWINDER] Simulating button press 'down' to stop Motion.");
+    digitalWrite(BUTTON_DOWN, LOW);
+    delay(300);
+    digitalWrite(BUTTON_DOWN, HIGH);
+    delay(500);
+  } else {
+    DEBUGPRINTLN2("[BELTWINDER] Direction is 0, 'stopMotion()' function skipped.");
+  }
+
+  DEBUGPRINTLN2("[BELTWINDER] Exiting stopMotion() function.");
+}
+
 
 // Saving the lower position
 void setMaxCount()
